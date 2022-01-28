@@ -1,3 +1,6 @@
+/** alphahttpd: memory region pointer
+2022, Simon Zolin
+*/
 
 // ffstr requires 16 bytes; range16 requires only 4 bytes
 typedef struct range16 {

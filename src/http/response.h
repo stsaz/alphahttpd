@@ -9,6 +9,7 @@ static int resp_open(struct client *c)
 static void resp_close(struct client *c)
 {
 	ffstr_free(&c->resp.last_modified);
+	sv_timer(c->srv, &c->resp.timer, 0, NULL, NULL);
 }
 
 static int resp_prepare(struct client *c);
@@ -74,6 +75,12 @@ static int resp_prepare(struct client *c)
 	return 0;
 }
 
+static void resp_send_expired(struct client *c)
+{
+	cl_dbglog(c, "send timeout");
+	cl_destroy(c);
+}
+
 static int resp_send(struct client *c)
 {
 	if (c->kev->whandler != NULL) {
@@ -102,6 +109,7 @@ static int resp_send(struct client *c)
 				c->kev->whandler = (ahd_kev_func)(void*)resp_send;
 				if (!c->kq_attached)
 					cl_kq_attach(c);
+				sv_timer(c->srv, &c->resp.timer, ahd_conf->write_timeout_sec*1000, (fftimerqueue_func)resp_send_expired, c);
 				return CHAIN_ASYNC;
 			}
 			cl_syswarnlog(c, "socket writev");
@@ -117,6 +125,7 @@ static int resp_send(struct client *c)
 		}
 	}
 
+	sv_timer(c->srv, &c->resp.timer, 0, NULL, NULL);
 	if (c->resp_done)
 		return CHAIN_DONE;
 	return CHAIN_BACK;

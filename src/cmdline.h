@@ -63,10 +63,10 @@ static int cmd_help()
 }
 
 static const ffcmdarg_arg ahd_cmd_args[] = {
-	{ 'l', "listen", FFCMDARG_TSTR | FFCMDARG_FNOTEMPTY, (ffsize)cmd_listen },
-	{ 'w', "www", FFCMDARG_TSTR | FFCMDARG_FNOTEMPTY, FF_OFF(struct ahd_conf, www) },
-	{ 'D', "debug", FFCMDARG_TSWITCH, (ffsize)cmd_debug },
-	{ 'h', "help", FFCMDARG_TSWITCH, (ffsize)cmd_help },
+	{ 'l', "listen",	FFCMDARG_TSTR | FFCMDARG_FNOTEMPTY, (ffsize)cmd_listen },
+	{ 'w', "www",	FFCMDARG_TSTR | FFCMDARG_FNOTEMPTY, FF_OFF(struct ahd_conf, www) },
+	{ 'D', "debug",	FFCMDARG_TSWITCH, (ffsize)cmd_debug },
+	{ 'h', "help",	FFCMDARG_TSWITCH, (ffsize)cmd_help },
 	{}
 };
 
@@ -84,8 +84,11 @@ void conf_init(struct ahd_conf *conf)
 	conf->write_buf_size = 4096;
 	conf->file_buf_size = 16*1024;
 	conf->events_num = 512;
+	conf->timer_interval_msec = 250;
 	conf->max_keep_alive_reqs = 100;
 	conf->log_level = LOG_INFO;
+	conf->read_timeout_sec = 65;
+	conf->write_timeout_sec = 65;
 	ffstr_dupz(&conf->www, "www");
 	ffstr_setz(&conf->index_filename, "index.html");
 }

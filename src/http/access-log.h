@@ -26,7 +26,7 @@ static int accesslog_open(struct client *c)
 		, &req_line, (int)c->resp.code
 		, c->req.transferred, c->resp.transferred
 		, tms);
-	ffstderr_write(c->file.buf.ptr, d - (char*)c->file.buf.ptr);
+	ffstderr_write(v.ptr, d - (char*)v.ptr);
 	ffvec_free(&v);
 	return CHAIN_DONE;
 }

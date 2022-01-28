@@ -1,9 +1,12 @@
 /** alphahttpd: server
 2022, Simon Zolin */
 
+#include <alphahttpd.h>
 #include <util/ipaddr.h>
 #include <FFOS/queue.h>
 #include <FFOS/socket.h>
+#include <FFOS/timer.h>
+#include <FFOS/perf.h>
 #include <ffbase/atomic.h>
 
 struct server {
@@ -14,12 +17,21 @@ struct server {
 	struct ahd_kev *connections;
 	struct ahd_kev *reusable_connections_lifo;
 	uint iconn, conn_num;
+
+	fftimer timer;
+	fftimerqueue timer_q;
+	struct ahd_kev timer_kev;
+	uint timer_now_ms;
+	fftime date_now;
+
 	uint worker_stop;
 	uint req_id;
 	uint log_level;
 };
 
 static void sv_accept(struct server *s);
+static int sv_timer_start(struct server *s);
+static int sv_worker(struct server *s);
 
 #define sv_sysfatallog(s, ...) \
 	ahd_log(LOG_SYSFATAL, NULL, __VA_ARGS__)
@@ -42,7 +54,12 @@ do { \
 		ahd_log(LOG_DBG, NULL, __VA_ARGS__); \
 } while (0)
 
-static int sv_prepare(struct server *s)
+struct server* sv_new()
+{
+	return ffmem_new(struct server);
+}
+
+int sv_run(struct server *s)
 {
 	s->kq = FFKQ_NULL;
 	s->lsock = FFSOCK_NULL;
@@ -105,16 +122,22 @@ static int sv_prepare(struct server *s)
 		return -1;
 	}
 
+	if (0 != sv_timer_start(s))
+		return -1;
+
 	sv_verblog(s, "listening on %u", ahd_conf->listen_port);
+	sv_worker(s);
 	return 0;
 }
 
-static void sv_destroy(struct server *s)
+void sv_free(struct server *s)
 {
+	fftimer_close(s->timer, s->kq);
 	ffsock_close(s->lsock);
 	ffkq_close(s->kq);
 	ffmem_free(s->kevents);
 	ffmem_free(s->connections);
+	ffmem_free(s);
 }
 
 uint sv_req_id_next(struct server *s)
@@ -222,10 +245,7 @@ int sv_kq_attach(struct server *s, ffsock sk, struct ahd_kev *kev, void *obj)
 
 fftime sv_date(struct server *s, ffstr *dts)
 {
-	fftime t;
-	fftime_now(&t);
-	t.sec += FFTIME_1970_SECONDS;
-
+	fftime t = s->date_now;
 	if (dts != NULL) {
 		static char buf[FFS_LEN("0000-00-00T00:00:00.000")+1];
 		ffdatetime dt;
@@ -236,4 +256,44 @@ fftime sv_date(struct server *s, ffstr *dts)
 	}
 
 	return t;
+}
+
+static void sv_ontimer(struct server *s)
+{
+	fftime_now(&s->date_now);
+	s->date_now.sec += FFTIME_1970_SECONDS;
+
+	fftime t = fftime_monotonic();
+	s->timer_now_ms = t.sec*1000 + t.nsec/1000000;
+	fftimerqueue_process(&s->timer_q, s->timer_now_ms);
+	fftimer_consume(s->timer);
+}
+
+static int sv_timer_start(struct server *s)
+{
+	if (FFTIMER_NULL == (s->timer = fftimer_create(0))) {
+		sv_sysfatallog(s, "fftimer_create");
+		return -1;
+	}
+	s->timer_kev.rhandler = (ahd_kev_func)(void*)sv_ontimer;
+	s->timer_kev.obj = s;
+	if (0 != fftimer_start(s->timer, s->kq, &s->timer_kev, ahd_conf->timer_interval_msec)) {
+		sv_sysfatallog(s, "fftimer_start");
+		return -1;
+	}
+	fftimerqueue_init(&s->timer_q);
+	sv_ontimer(s);
+	return 0;
+}
+
+void sv_timer(struct server *s, ahd_timer *tmr, int interval_msec, fftimerqueue_func func, void *param)
+{
+	if (interval_msec == 0) {
+		if (fftimerqueue_remove(&s->timer_q, tmr))
+			sv_dbglog(s, "timer remove: %p", tmr);
+		return;
+	}
+
+	fftimerqueue_add(&s->timer_q, tmr, s->timer_now_ms, interval_msec, func, param);
+	sv_dbglog(s, "timer add: %p %d", tmr, interval_msec);
 }

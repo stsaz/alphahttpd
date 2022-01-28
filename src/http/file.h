@@ -68,9 +68,9 @@ static int file_open(struct client *c)
 		cl_resp_status(c, HTTP_500_INTERNAL_SERVER_ERROR);
 		return -1;
 	}
-	ffstr_add2((ffstr*)&c->file.buf, c->file.buf.cap, &ahd_conf->www);
-	ffstr_add2((ffstr*)&c->file.buf, c->file.buf.cap, &c->req.unescaped_path);
-	ffstr_addchar((ffstr*)&c->file.buf, c->file.buf.cap, '\0');
+	ffstr_add2((ffstr*)&c->file.buf, -1, &ahd_conf->www);
+	ffstr_add2((ffstr*)&c->file.buf, -1, &c->req.unescaped_path);
+	ffstr_addchar((ffstr*)&c->file.buf, -1, '\0');
 
 	const char *fname = c->file.buf.ptr;
 	if (FFFILE_NULL == (c->file.f = fffile_open(fname, FFFILE_READONLY | FFFILE_NOATIME))) {

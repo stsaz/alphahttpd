@@ -3,7 +3,6 @@
 
 #include <alphahttpd.h>
 #include <log.h>
-#include <server.h>
 #include <cmdline.h>
 #include <sys/resource.h>
 
@@ -21,20 +20,21 @@ int main(int argc, char **argv)
 	if (0 != cmd_read(ahd_conf, argc, (const char**)argv))
 		goto end;
 
-	struct rlimit rl;
-	rl.rlim_cur = ahd_conf->fd_limit;
-	rl.rlim_max = ahd_conf->fd_limit;
-	setrlimit(RLIMIT_NOFILE, &rl);
+	if (ahd_conf->fd_limit != 0) {
+		struct rlimit rl;
+		rl.rlim_cur = ahd_conf->fd_limit;
+		rl.rlim_max = ahd_conf->fd_limit;
+		setrlimit(RLIMIT_NOFILE, &rl);
+	}
 
-	s = ffmem_new(struct server);
-	if (0 != sv_prepare(s))
+	s = sv_new();
+	log_s = s;
+	if (0 != sv_run(s))
 		goto end;
-	sv_worker(s);
 
 end:
 	if (s != NULL) {
-		sv_destroy(s);
-		ffmem_free(s);
+		sv_free(s);
 	}
 	conf_destroy(ahd_conf);
 	ffmem_free(ahd_conf);

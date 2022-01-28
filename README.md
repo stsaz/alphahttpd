@@ -4,18 +4,16 @@
 
 Current features and limitations:
 
-* Runs on Linux and FreeBSD
+* Runs on Linux and FreeBSD (uses epoll and kqueue)
 * HTTP/1.1 only
 * Serves the file tree in `www/` directory by default
 * Uses `index.html` as index file
 * Doesn't use sendfile()
 * No caching
 * No ETag, Content-Type, If-None-Match, Range
-* No timer
 * Single thread only
 * stdout/stderr logging only
 * SSE-optimized HTTP parser
-* Uses epoll and kqueue for events signalling
 * Basic command-line parameters; no configuration file
 * Instant build and startup
 * <100KB portable binary file

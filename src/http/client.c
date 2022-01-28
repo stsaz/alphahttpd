@@ -65,6 +65,7 @@ struct client {
 		ffstr unescaped_path;
 		ffvec buf;
 		ffuint64 transferred;
+		ahd_timer timer;
 	} req;
 
 	struct {
@@ -81,6 +82,7 @@ struct client {
 		ffstr last_modified;
 		ffvec buf;
 		ffuint64 transferred;
+		ahd_timer timer;
 	} resp;
 
 	struct {
@@ -106,6 +108,7 @@ static void cl_init(struct client *c);
 static void cl_mods_close(struct client *c);
 static void cl_chain_process(struct client *c);
 static void cl_kq_attach(struct client *c);
+static void cl_destroy(struct client *c);
 
 enum HTTP_STATUS {
 	HTTP_200_OK,
@@ -344,7 +347,6 @@ static void cl_chain_process(struct client *c)
 			return;
 
 		case CHAIN_ERR:
-			c->mdata[i].done = 1;
 			goto end;
 
 		case CHAIN_FIN:

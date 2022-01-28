@@ -16,6 +16,7 @@ endif
 ifneq "$(SSE42)" "0"
 	CFLAGS += -msse4.2
 endif
+LDFLAGS := -s
 
 all: alphahttpd
 
@@ -29,8 +30,11 @@ DEPS := $(wildcard $(AHD_DIR)/src/*.h) \
 %.o: $(AHD_DIR)/src/http/%.c $(DEPS)
 	$(C) $(CFLAGS) $< -o $@
 
-alphahttpd: main.o client.o
-	$(LINK) $+ -o $@
+alphahttpd: \
+		client.o \
+		main.o \
+		server.o
+	$(LINK) $(LDFLAGS) $+ -o $@
 
 clean:
 	rm -fv alphahttpd *.o

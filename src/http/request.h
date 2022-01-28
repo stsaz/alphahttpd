@@ -14,6 +14,13 @@ static int req_open(struct client *c)
 static void req_close(struct client *c)
 {
 	ffstr_free(&c->req.unescaped_path);
+	sv_timer(c->srv, &c->req.timer, 0, NULL, NULL);
+}
+
+static void req_read_expired(struct client *c)
+{
+	cl_dbglog(c, "receive timeout");
+	cl_destroy(c);
 }
 
 static int req_read(struct client *c)
@@ -38,6 +45,7 @@ static int req_read(struct client *c)
 				c->kev->rhandler = (ahd_kev_func)(void*)req_read;
 				if (!c->kq_attached)
 					cl_kq_attach(c);
+				sv_timer(c->srv, &c->req.timer, ahd_conf->read_timeout_sec*1000, (fftimerqueue_func)req_read_expired, c);
 				return CHAIN_ASYNC;
 			}
 			cl_syswarnlog(c, "ffsock_recv");
@@ -55,8 +63,10 @@ static int req_read(struct client *c)
 		c->req.buf.len += r;
 		c->req.transferred += r;
 
-		if (0 == req_parse(c))
+		if (0 == req_parse(c)) {
+			sv_timer(c->srv, &c->req.timer, 0, NULL, NULL);
 			return CHAIN_FWD;
+		}
 
 		if (c->req.buf.len == c->req.buf.cap) {
 			cl_warnlog(c, "reached `read_buf_size` limit");

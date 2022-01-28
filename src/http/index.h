@@ -15,8 +15,8 @@ static int index_open(struct client *c)
 		cl_resp_status(c, HTTP_500_INTERNAL_SERVER_ERROR);
 		return CHAIN_DONE;
 	}
-	ffstr_addchar(&c->req.unescaped_path, cap, '/');
-	ffstr_add2(&c->req.unescaped_path, cap, &ahd_conf->index_filename);
+	ffstr_addchar(&c->req.unescaped_path, -1, '/');
+	ffstr_add2(&c->req.unescaped_path, -1, &ahd_conf->index_filename);
 	return CHAIN_DONE;
 }
 
