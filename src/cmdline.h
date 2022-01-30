@@ -89,6 +89,7 @@ void conf_init(struct ahd_conf *conf)
 	conf->log_level = LOG_INFO;
 	conf->read_timeout_sec = 65;
 	conf->write_timeout_sec = 65;
+	conf->tcp_nodelay = 1;
 	ffstr_dupz(&conf->www, "www");
 	ffstr_setz(&conf->index_filename, "index.html");
 }

@@ -12,11 +12,11 @@ ifeq "$(OPT)" "0"
 	CFLAGS += -DFF_DEBUG -O0 -g
 else
 	CFLAGS += -O3 -fno-strict-aliasing
+	LDFLAGS := -s
 endif
 ifneq "$(SSE42)" "0"
 	CFLAGS += -msse4.2
 endif
-LDFLAGS := -s
 
 all: alphahttpd
 
