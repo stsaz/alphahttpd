@@ -3,6 +3,7 @@
 
 #include <util/cmdarg-scheme.h>
 #include <util/ipaddr.h>
+#include <FFOS/sysconf.h>
 
 #define R_DONE  100
 #define R_BADVAL  101
@@ -48,6 +49,13 @@ static int cmd_debug(void *cs, struct ahd_conf *conf)
 	return 0;
 }
 
+static int cmd_cpumask(void *cs, struct ahd_conf *conf, ffstr *val)
+{
+	if (!ffstr_toint(val, &conf->cpumask, FFS_INT32 | FFS_INTHEX))
+		return R_BADVAL;
+	return 0;
+}
+
 static int cmd_help()
 {
 	static const char help[] =
@@ -55,16 +63,20 @@ static int cmd_help()
 "-l, --listen ADDR   Listening IP and TCP port (def: 80)\n"
 "                      e.g. 8080 or 127.0.0.1:8080 or [::1]:8080\n"
 "-w, --www DIR       Web directory (def: www)\n"
+"-t, --threads N     Worker threads (def: CPU#)\n"
+"-c, --cpumask N     CPU affinity bitmask, hex value (e.g. 15 for CPUs 0,2,4)\n"
 "-D, --debug         Debug log level\n"
 "-h, --help          Show help\n"
 ;
-	ffstdout_write(help, sizeof(help)-1);
+	ffstdout_write(help, FFS_LEN(help));
 	return R_DONE;
 }
 
 static const ffcmdarg_arg ahd_cmd_args[] = {
 	{ 'l', "listen",	FFCMDARG_TSTR | FFCMDARG_FNOTEMPTY, (ffsize)cmd_listen },
 	{ 'w', "www",	FFCMDARG_TSTR | FFCMDARG_FNOTEMPTY, FF_OFF(struct ahd_conf, www) },
+	{ 't', "threads",	FFCMDARG_TINT32, FF_OFF(struct ahd_conf, workers_n) },
+	{ 'c', "cpumask",	FFCMDARG_TSTR, (ffsize)cmd_cpumask },
 	{ 'D', "debug",	FFCMDARG_TSWITCH, (ffsize)cmd_debug },
 	{ 'h', "help",	FFCMDARG_TSWITCH, (ffsize)cmd_help },
 	{}
@@ -84,14 +96,34 @@ void conf_init(struct ahd_conf *conf)
 	conf->write_buf_size = 4096;
 	conf->file_buf_size = 16*1024;
 	conf->events_num = 512;
+	conf->tcp_nodelay = 1;
 	conf->timer_interval_msec = 250;
 	conf->max_keep_alive_reqs = 100;
 	conf->log_level = LOG_INFO;
+
 	conf->read_timeout_sec = 65;
 	conf->write_timeout_sec = 65;
-	conf->tcp_nodelay = 1;
+	conf->fdlimit_timeout_sec = 10;
+
 	ffstr_dupz(&conf->www, "www");
 	ffstr_setz(&conf->index_filename, "index.html");
+}
+
+int cmd_fin(struct ahd_conf *conf)
+{
+	if (!(ahd_conf->read_buf_size > 16 && ahd_conf->write_buf_size > 16)) {
+		ffstderr_fmt("bad buffer sizes\n");
+		return -1;
+	}
+
+	if (conf->workers_n == 0) {
+		ffsysconf sc;
+		ffsysconf_init(&sc);
+		conf->workers_n = ffsysconf_get(&sc, FFSYSCONF_NPROCESSORS_ONLN);
+		if (conf->cpumask == 0)
+			conf->cpumask = (uint)-1;
+	}
+	return 0;
 }
 
 int cmd_read(struct ahd_conf *conf, int argc, const char **argv)
@@ -102,10 +134,12 @@ int cmd_read(struct ahd_conf *conf, int argc, const char **argv)
 		if (r == -R_DONE)
 			return -1;
 		else if (r == -R_BADVAL)
-			ahd_log(LOG_ERR, NULL, "command line: bad value");
+			ffstderr_fmt("command line: bad value\n");
 		else
-			ahd_log(LOG_ERR, NULL, "command line: %S", &errmsg);
+			ffstderr_fmt("command line: %S\n", &errmsg);
 		return -1;
 	}
+	if (0 != cmd_fin(conf))
+		return -1;
 	return 0;
 }

@@ -7,8 +7,16 @@
 #include <FFOS/socket.h>
 #include <FFOS/time.h>
 #include <FFOS/timerqueue.h>
+#include <ffbase/vector.h>
 
-#define AHD_VER "v0.1"
+#define AHD_VER "v0.2"
+
+struct ahd_boss {
+	ffvec workers; // struct server*[]
+	uint req_id;
+};
+
+typedef fftimerqueue_node ahd_timer;
 
 struct ahd_conf {
 	char bind_ip[16];
@@ -19,9 +27,11 @@ struct ahd_conf {
 	uint fd_limit;
 	uint events_num;
 	uint timer_interval_msec;
+	uint workers_n;
+	uint cpumask;
 
 	uint read_buf_size, write_buf_size, file_buf_size;
-	uint read_timeout_sec, write_timeout_sec;
+	uint read_timeout_sec, write_timeout_sec, fdlimit_timeout_sec;
 	uint max_keep_alive_reqs;
 	ffstr index_filename;
 	ffstr www;
@@ -29,13 +39,27 @@ struct ahd_conf {
 extern struct ahd_conf *ahd_conf;
 
 struct server;
-struct server* sv_new();
+struct server* sv_new(struct ahd_boss *boss);
 void sv_free(struct server *s);
+void sv_stop(struct server *s);
+void sv_cpu_affinity(struct server *s, uint mask);
+int sv_start(struct server *s);
 int sv_run(struct server *s);
+
+/** Get cached calendar UTC date */
 fftime sv_date(struct server *s, ffstr *dts);
-typedef fftimerqueue_node ahd_timer;
+
+/** Get thread ID */
+ffuint64 sv_tid(struct server *s);
+
+/** Add/restart/remove periodic/one-shot timer */
 void sv_timer(struct server *s, ahd_timer *tmr, int interval_msec, fftimerqueue_func func, void *param);
+#define sv_timer_stop(s, tmr) \
+	sv_timer(s, tmr, 0, NULL, NULL)
+
+/** Get next request ID */
 uint sv_req_id_next(struct server *s);
+
 struct ahd_kev;
 void sv_conn_fin(struct server *s, struct ahd_kev *kev);
 int sv_kq_attach(struct server *s, ffsock sk, struct ahd_kev *kev, void *obj);
@@ -59,8 +83,9 @@ enum LOG {
 	LOG_DBG,
 };
 
-/** level: enum LOG */
-void ahd_log(uint level, const char *id, const char *fmt, ...);
+/** Add line to log
+level: enum LOG */
+void ahd_log(struct server *s, uint level, const char *id, const char *fmt, ...);
 
 
 /** Start processing the client */

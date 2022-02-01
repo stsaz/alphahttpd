@@ -7,6 +7,7 @@ request -> index -> file/error <-> content-length <-> response -> access-log
 
 #include <alphahttpd.h>
 #include <util/http1.h>
+#include <util/http1-status.h>
 #include <util/ipaddr.h>
 #include <util/range.h>
 #include <FFOS/socket.h>
@@ -17,6 +18,7 @@ enum {
 	CHAIN_FWD,
 	CHAIN_BACK,
 	CHAIN_ASYNC,
+	CHAIN_SKIP,
 	CHAIN_ERR,
 	CHAIN_FIN,
 };
@@ -91,6 +93,7 @@ struct client {
 	} send;
 
 	unsigned chain_back :1;
+	unsigned req_method_head :1;
 	unsigned req_unprocessed_data :1;
 	unsigned resp_connection_keepalive :1;
 	unsigned resp_err :1;
@@ -105,98 +108,31 @@ struct client {
 };
 
 static void cl_init(struct client *c);
-static void cl_mods_close(struct client *c);
 static void cl_chain_process(struct client *c);
 static void cl_kq_attach(struct client *c);
 static void cl_destroy(struct client *c);
-
-enum HTTP_STATUS {
-	HTTP_200_OK,
-	HTTP_206_PARTIAL,
-
-	HTTP_301_MOVED_PERMANENTLY,
-	HTTP_302_FOUND,
-	HTTP_304_NOT_MODIFIED,
-
-	HTTP_400_BAD_REQUEST,
-	HTTP_403_FORBIDDEN,
-	HTTP_404_NOT_FOUND,
-	HTTP_405_METHOD_NOT_ALLOWED,
-	HTTP_413_REQUEST_ENTITY_TOO_LARGE,
-	HTTP_415_UNSUPPORTED_MEDIA_TYPE,
-	HTTP_416_REQUESTED_RANGE_NOT_SATISFIABLE,
-
-	HTTP_500_INTERNAL_SERVER_ERROR,
-	HTTP_501_NOT_IMPLEMENTED,
-	HTTP_502_BAD_GATEWAY,
-	HTTP_504_GATEWAY_TIMEOUT,
-
-	_HTTP_STATUS_END,
-};
-static const ffushort http_status_code[] = {
-	200,
-	206,
-
-	301,
-	302,
-	304,
-
-	400,
-	403,
-	404,
-	405,
-	413,
-	415,
-	416,
-
-	500,
-	501,
-	502,
-	504,
-};
-static const char http_status_msg[][32] = {
-	"OK",
-	"Partial",
-
-	"Moved Permanently",
-	"Found",
-	"Not Modified",
-
-	"Bad Request",
-	"Forbidden",
-	"Not Found",
-	"Method Not Allowed",
-	"Request Entity Too Large",
-	"Unsupported Media Type",
-	"Requested Range Not Satisfiable",
-
-	"Internal Server Error",
-	"Not Implemented",
-	"Bad Gateway",
-	"Gateway Timeout",
-};
 static void cl_resp_status(struct client *c, enum HTTP_STATUS status);
 static void cl_resp_status_ok(struct client *c, enum HTTP_STATUS status);
 
 #define cl_errlog(c, ...) \
-	ahd_log(LOG_ERR, c->id, __VA_ARGS__)
+	ahd_log(c->srv, LOG_ERR, c->id, __VA_ARGS__)
 
 #define cl_syswarnlog(c, ...) \
-	ahd_log(LOG_SYSWARN, c->id, __VA_ARGS__)
+	ahd_log(c->srv, LOG_SYSWARN, c->id, __VA_ARGS__)
 
 #define cl_warnlog(c, ...) \
-	ahd_log(LOG_WARN, c->id, __VA_ARGS__)
+	ahd_log(c->srv, LOG_WARN, c->id, __VA_ARGS__)
 
 #define cl_verblog(c, ...) \
 do { \
 	if (c->log_level >= LOG_VERB) \
-		ahd_log(LOG_VERB, c->id, __VA_ARGS__); \
+		ahd_log(c->srv, LOG_VERB, c->id, __VA_ARGS__); \
 } while (0)
 
 #define cl_dbglog(c, ...) \
 do { \
 	if (c->log_level >= LOG_DBG) \
-		ahd_log(LOG_DBG, c->id, __VA_ARGS__); \
+		ahd_log(c->srv, LOG_DBG, c->id, __VA_ARGS__); \
 } while (0)
 
 #include <http/request.h>
@@ -211,7 +147,7 @@ void cl_start(struct ahd_kev *kev, ffsock csock, const ffsockaddr *peer, struct 
 {
 	struct client *c = ffmem_alloc(sizeof(struct client) + ahd_conf->read_buf_size + ahd_conf->write_buf_size);
 	if (c == NULL) {
-		ahd_log(LOG_ERR, NULL, "no memory");
+		ahd_log(s, LOG_ERR, NULL, "no memory");
 		return;
 	}
 	ffmem_zero_obj(c);
@@ -249,6 +185,14 @@ static void cl_init(struct client *c)
 	c->resp.content_length = (ffuint64)-1;
 }
 
+static void cl_mods_close(struct client *c)
+{
+	for (uint i = 0;  i != FF_COUNT(mods);  i++) {
+		if (c->mdata[i].opened)
+			mods[i]->close(c);
+	}
+}
+
 static void cl_destroy(struct client *c)
 {
 	cl_dbglog(c, "closing client connection");
@@ -257,14 +201,6 @@ static void cl_destroy(struct client *c)
 	cl_mods_close(c);
 	sv_conn_fin(c->srv, c->kev);
 	ffmem_free(c);
-}
-
-static void cl_mods_close(struct client *c)
-{
-	for (int i = 0;  i != FF_COUNT(mods);  i++) {
-		if (c->mdata[i].opened)
-			mods[i]->close(c);
-	}
 }
 
 static void cl_reset(struct client *c)
@@ -300,7 +236,7 @@ static void cl_chain_process(struct client *c)
 			cl_dbglog(c, "opening module %u", i);
 			r = mods[i]->open(c);
 			cl_dbglog(c, "  module %u returned: %u", i, r);
-			if (r == CHAIN_DONE || r == CHAIN_ERR) {
+			if (r == CHAIN_SKIP || r == CHAIN_ERR) {
 				c->mdata[i].done = 1;
 				c->output = c->input;
 			} else {
@@ -317,6 +253,7 @@ static void cl_chain_process(struct client *c)
 		}
 
 		switch (r) {
+		case CHAIN_SKIP:
 		case CHAIN_DONE:
 			c->mdata[i].done = 1;
 			// fallthrough

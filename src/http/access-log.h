@@ -16,7 +16,7 @@ static int accesslog_open(struct client *c)
 	ffvec v = {};
 	if (NULL == ffvec_alloc(&v, 500 + req_line.len, 1)) {
 		cl_warnlog(c, "no memory");
-		return CHAIN_DONE;
+		return CHAIN_SKIP;
 	}
 	char *d = v.ptr, *end = d + v.cap - 1;
 	d += ffip46_tostr((void*)c->peer_ip, d, end - d);
@@ -28,7 +28,7 @@ static int accesslog_open(struct client *c)
 		, tms);
 	ffstderr_write(v.ptr, d - (char*)v.ptr);
 	ffvec_free(&v);
-	return CHAIN_DONE;
+	return CHAIN_SKIP;
 }
 
 static const struct ahd_mod accesslog_mod = {

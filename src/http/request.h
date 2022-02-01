@@ -14,7 +14,7 @@ static int req_open(struct client *c)
 static void req_close(struct client *c)
 {
 	ffstr_free(&c->req.unescaped_path);
-	sv_timer(c->srv, &c->req.timer, 0, NULL, NULL);
+	sv_timer_stop(c->srv, &c->req.timer);
 }
 
 static void req_read_expired(struct client *c)
@@ -64,7 +64,7 @@ static int req_read(struct client *c)
 		c->req.transferred += r;
 
 		if (0 == req_parse(c)) {
-			sv_timer(c->srv, &c->req.timer, 0, NULL, NULL);
+			sv_timer_stop(c->srv, &c->req.timer);
 			return CHAIN_FWD;
 		}
 

@@ -49,14 +49,15 @@ static int mtime(struct client *c, const fffileinfo *fi)
 static int file_open(struct client *c)
 {
 	if (c->resp_err)
-		return CHAIN_DONE;
+		return CHAIN_SKIP;
 
 	c->file.f = FFFILE_NULL;
 
 	ffstr method = range16_tostr(&c->req.method, c->req.buf.ptr);
-	if (!ffstr_eqz(&method, "GET")) {
+	if (!(ffstr_eqz(&method, "GET")
+			|| (c->req_method_head = ffstr_eqz(&method, "HEAD")))) {
 		cl_resp_status(c, HTTP_405_METHOD_NOT_ALLOWED);
-		goto fail;
+		goto done;
 	}
 
 	if (ahd_conf->www.len + c->req.unescaped_path.len + 1 > ahd_conf->file_buf_size) {
@@ -77,7 +78,7 @@ static int file_open(struct client *c)
 		if (fferr_notexist(fferr_last())) {
 			cl_dbglog(c, "fffile_open: %s: not found", fname);
 			cl_resp_status(c, HTTP_404_NOT_FOUND);
-			goto fail;
+			goto done;
 		}
 		cl_syswarnlog(c, "fffile_open: %s", fname);
 		goto err;
@@ -87,25 +88,31 @@ static int file_open(struct client *c)
 	if (0 != fffile_info(c->file.f, &fi)) {
 		cl_syswarnlog(c, "fffile_info: %s", fname);
 		cl_resp_status(c, HTTP_403_FORBIDDEN);
-		goto fail;
+		goto done;
 	}
 
 	if (0 != handle_redirect(c, &fi))
-		goto fail;
+		goto done;
 	if (0 != mtime(c, &fi))
-		goto fail;
+		goto done;
 
 	c->resp.content_length = fffileinfo_size(&fi);
 	cl_resp_status_ok(c, HTTP_200_OK);
+
+	if (method.ptr[0] == 'H') { // HEAD
+		c->resp_done = 1;
+		goto done;
+	}
+
 	return CHAIN_FWD;
 
 err:
 	file_close(c);
 	return CHAIN_ERR;
 
-fail:
+done:
 	file_close(c);
-	return CHAIN_DONE;
+	return CHAIN_SKIP;
 }
 
 static void file_close(struct client *c)

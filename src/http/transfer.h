@@ -5,7 +5,7 @@ static int trans_open(struct client *c)
 {
 	if (c->resp.content_length == (ffuint64)-1) {
 		c->resp_connection_keepalive = 0;
-		return CHAIN_DONE;
+		return CHAIN_SKIP;
 	}
 	c->conlen = c->resp.content_length;
 	return CHAIN_FWD;

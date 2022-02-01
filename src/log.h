@@ -3,17 +3,15 @@
 
 #include <FFOS/std.h>
 
-struct server *log_s;
-
-// TIME LEVEL: [ID:] MSG [: SYSERR]
-void ahd_log(uint level, const char *id, const char *fmt, ...)
+// TIME LEVEL: #TID: [ID:] MSG [: SYSERR]
+void ahd_log(struct server *s, uint level, const char *id, const char *fmt, ...)
 {
 	char buf[1024];
 	ffsize cap = sizeof(buf) - 2;
 
 	// time
 	ffstr dts;
-	sv_date(log_s, &dts);
+	sv_date(s, &dts);
 	ffsize r = _ffs_copy(buf, cap, dts.ptr, dts.len);
 
 	// level
@@ -30,6 +28,11 @@ void ahd_log(uint level, const char *id, const char *fmt, ...)
 	};
 	FF_ASSERT(FF_COUNT(level_str) == LOG_DBG+1);
 	r += _ffs_copyz(&buf[r], cap - r, level_str[level]);
+	buf[r++] = ':';
+	buf[r++] = '\t';
+
+	buf[r++] = '#';
+	r += ffs_fromint(sv_tid(s), &buf[r], cap - r, 0);
 	buf[r++] = ':';
 	buf[r++] = '\t';
 

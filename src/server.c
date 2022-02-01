@@ -7,26 +7,32 @@
 #include <FFOS/socket.h>
 #include <FFOS/timer.h>
 #include <FFOS/perf.h>
+#include <FFOS/thread.h>
 #include <ffbase/atomic.h>
 
 struct server {
 	struct ahd_kev kev;
+	struct ahd_boss *boss;
+	ffthread thd;
+	ffuint64 thd_id;
 	ffsock lsock;
 	ffkq kq;
 	ffkq_event *kevents;
 	struct ahd_kev *connections;
 	struct ahd_kev *reusable_connections_lifo;
 	uint iconn, conn_num;
+	ahd_timer tmr_fdlimit;
+	struct ahd_kev post_kev;
+	ffkq_postevent kqpost;
+	uint worker_stop;
+	uint log_level;
 
 	fftimer timer;
 	fftimerqueue timer_q;
 	struct ahd_kev timer_kev;
 	uint timer_now_ms;
 	fftime date_now;
-
-	uint worker_stop;
-	uint req_id;
-	uint log_level;
+	char date_buf[FFS_LEN("0000-00-00T00:00:00.000")+1];
 };
 
 static void sv_accept(struct server *s);
@@ -34,48 +40,74 @@ static int sv_timer_start(struct server *s);
 static int sv_worker(struct server *s);
 
 #define sv_sysfatallog(s, ...) \
-	ahd_log(LOG_SYSFATAL, NULL, __VA_ARGS__)
+	ahd_log(s, LOG_SYSFATAL, NULL, __VA_ARGS__)
 
 #define sv_syserrlog(s, ...) \
-	ahd_log(LOG_SYSERR, NULL, __VA_ARGS__)
+	ahd_log(s, LOG_SYSERR, NULL, __VA_ARGS__)
 
 #define sv_errlog(s, ...) \
-	ahd_log(LOG_ERR, NULL, __VA_ARGS__)
+	ahd_log(s, LOG_ERR, NULL, __VA_ARGS__)
 
 #define sv_verblog(s, ...) \
 do { \
 	if (s->log_level >= LOG_VERB) \
-		ahd_log(LOG_VERB, NULL, __VA_ARGS__); \
+		ahd_log(s, LOG_VERB, NULL, __VA_ARGS__); \
 } while (0)
 
 #define sv_dbglog(s, ...) \
 do { \
 	if (s->log_level >= LOG_DBG) \
-		ahd_log(LOG_DBG, NULL, __VA_ARGS__); \
+		ahd_log(s, LOG_DBG, NULL, __VA_ARGS__); \
 } while (0)
 
-struct server* sv_new()
+struct server* sv_new(struct ahd_boss *boss)
 {
-	return ffmem_new(struct server);
-}
-
-int sv_run(struct server *s)
-{
+	struct server *s = ffmem_new(struct server);
+	s->thd = FFTHREAD_NULL;
 	s->kq = FFKQ_NULL;
 	s->lsock = FFSOCK_NULL;
 	s->log_level = ahd_conf->log_level;
-	s->req_id = 1;
+	s->boss = boss;
+	return s;
+}
 
-	if (!(ahd_conf->read_buf_size > 16 && ahd_conf->write_buf_size > 16)) {
-		sv_errlog(s, "bad buffer sizes");
+int sv_start(struct server *s)
+{
+	if (FFTHREAD_NULL == (s->thd = ffthread_create((ffthread_proc)(void*)sv_run, s, 0))) {
+		sv_sysfatallog(s, "thread create");
 		return -1;
 	}
+	return 0;
+}
 
-	ffsock_init(FFSOCK_INIT_SIGPIPE);
+void sv_stop(struct server *s)
+{
+	FFINT_WRITEONCE(s->worker_stop, 1);
+	ffkq_post(s->kqpost, &s->post_kev);
+	if (s->thd != FFTHREAD_NULL) {
+		ffthread_join(s->thd, -1, NULL);
+	}
+}
+
+void sv_cpu_affinity(struct server *s, uint icpu)
+{
+	cpu_set_t cpuset;
+	CPU_ZERO(&cpuset);
+	CPU_SET(icpu, &cpuset);
+	ffthread t = (s->thd != FFTHREAD_NULL) ? s->thd : pthread_self();
+	if (0 != pthread_setaffinity_np(t, sizeof(cpuset), &cpuset)) {
+		sv_syserrlog(s, "set CPU affinity");
+		return;
+	}
+	sv_dbglog(s, "CPU affinity: %u", icpu);
+}
+
+int FFTHREAD_PROCCALL sv_run(struct server *s)
+{
+	s->thd_id = ffthread_curid();
 
 	s->connections = (void*)ffmem_alloc(ahd_conf->max_connections * sizeof(struct ahd_kev));
 	s->kevents = (void*)ffmem_alloc(ahd_conf->events_num * sizeof(ffkq_event));
-
 	if (s->connections == NULL || s->kevents == NULL) {
 		sv_sysfatallog(s, "no memory");
 		return -1;
@@ -83,6 +115,10 @@ int sv_run(struct server *s)
 
 	if (FFKQ_NULL == (s->kq = ffkq_create())) {
 		sv_sysfatallog(s, "ffkq_create");
+		return -1;
+	}
+	if (FFKQ_NULL == (s->kqpost = ffkq_post_attach(s->kq, &s->post_kev))) {
+		sv_sysfatallog(s, "ffkq_post_attach");
 		return -1;
 	}
 
@@ -99,10 +135,19 @@ int sv_run(struct server *s)
 	} else {
 		ffsockaddr_set_ipv6(&addr, ahd_conf->bind_ip, ahd_conf->listen_port);
 
-		if (0 != ffsock_setopt(s->lsock, IPPROTO_IPV6, IPV6_V6ONLY, 0)) {
+		// Allow clients to connect via IPv4
+		if (ffip6_isany((void*)ahd_conf->bind_ip)
+			&& 0 != ffsock_setopt(s->lsock, IPPROTO_IPV6, IPV6_V6ONLY, 0)) {
 			sv_sysfatallog(s, "ffsock_setopt(IPV6_V6ONLY)");
 			return -1;
 		}
+	}
+
+	// Allow several listening sockets to bind to the same address/port.
+	// OS automatically distributes the load among the sockets.
+	if (0 != ffsock_setopt(s->lsock, SOL_SOCKET, SO_REUSEPORT, 1)) {
+		sv_sysfatallog(s, "ffsock_setopt(SO_REUSEPORT)");
+		return -1;
 	}
 
 	if (0 != ffsock_bind(s->lsock, &addr)) {
@@ -142,13 +187,14 @@ void sv_free(struct server *s)
 
 uint sv_req_id_next(struct server *s)
 {
-	return ffint_fetch_add(&s->req_id, 1);
+	return ffint_fetch_add(&s->boss->req_id, 1);
 }
 
 static int sv_accept1(struct server *s)
 {
 	if (s->conn_num == ahd_conf->max_connections) {
-		sv_errlog(s, "reached max parallel connections limit");
+		sv_errlog(s, "reached max parallel connections limit %u", ahd_conf->max_connections);
+		sv_timer(s, &s->tmr_fdlimit, -(int)ahd_conf->fdlimit_timeout_sec*1000, (fftimerqueue_func)sv_accept, s);
 		return -1;
 	}
 
@@ -160,6 +206,7 @@ static int sv_accept1(struct server *s)
 
 		if (fferr_fdlimit(fferr_last())) {
 			sv_syserrlog(s, "ffsock_accept");
+			sv_timer(s, &s->tmr_fdlimit, -(int)ahd_conf->fdlimit_timeout_sec*1000, (fftimerqueue_func)sv_accept, s);
 			return -1;
 		}
 
@@ -171,10 +218,11 @@ static int sv_accept1(struct server *s)
 	if (kev != NULL) {
 		s->reusable_connections_lifo = kev->next_kev;
 		kev->next_kev = NULL;
-		sv_dbglog(s, "reusing connection slot #%u", (uint)(kev - s->connections));
 	} else {
 		kev = &s->connections[s->iconn++];
 	}
+	sv_dbglog(s, "using connection slot #%u [%u]"
+		, (uint)(kev - s->connections), s->conn_num + 1);
 
 	s->conn_num++;
 	cl_start(kev, csock, &peer, s);
@@ -216,6 +264,7 @@ static int sv_worker(struct server *s)
 			return -1;
 		}
 	}
+	sv_dbglog(s, "leaving kq loop");
 	return 0;
 }
 
@@ -231,6 +280,8 @@ void sv_conn_fin(struct server *s, struct ahd_kev *kev)
 
 	FF_ASSERT(s->conn_num != 0);
 	s->conn_num--;
+	sv_dbglog(s, "free connection slot #%u [%u]"
+		, (uint)(kev - s->connections), s->conn_num);
 }
 
 int sv_kq_attach(struct server *s, ffsock sk, struct ahd_kev *kev, void *obj)
@@ -243,16 +294,22 @@ int sv_kq_attach(struct server *s, ffsock sk, struct ahd_kev *kev, void *obj)
 	return 0;
 }
 
+ffuint64 sv_tid(struct server *s)
+{
+	return s->thd_id;
+}
+
 fftime sv_date(struct server *s, ffstr *dts)
 {
 	fftime t = s->date_now;
 	if (dts != NULL) {
-		static char buf[FFS_LEN("0000-00-00T00:00:00.000")+1];
-		ffdatetime dt;
-		fftime_split1(&dt, &t);
-		ffsize r = fftime_tostr1(&dt, buf, sizeof(buf), FFTIME_DATE_YMD | FFTIME_HMS_MSEC);
-		buf[10] = 'T';
-		ffstr_set(dts, buf, r);
+		if (s->date_buf[0] == '\0') {
+			ffdatetime dt;
+			fftime_split1(&dt, &t);
+			fftime_tostr1(&dt, s->date_buf, sizeof(s->date_buf), FFTIME_DATE_YMD | FFTIME_HMS_MSEC);
+			s->date_buf[10] = 'T';
+		}
+		ffstr_set(dts, s->date_buf, sizeof(s->date_buf)-1);
 	}
 
 	return t;
@@ -265,6 +322,8 @@ static void sv_ontimer(struct server *s)
 
 	fftime t = fftime_monotonic();
 	s->timer_now_ms = t.sec*1000 + t.nsec/1000000;
+	s->date_buf[0] = '\0';
+
 	fftimerqueue_process(&s->timer_q, s->timer_now_ms);
 	fftimer_consume(s->timer);
 }

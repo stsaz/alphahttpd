@@ -11,7 +11,7 @@ Current features and limitations:
 * Doesn't use sendfile()
 * No caching
 * No ETag, Content-Type, If-None-Match, Range
-* Single thread only
+* Multi-threaded, uses all CPUs by default
 * stdout/stderr logging only
 * SSE-optimized HTTP parser
 * Basic command-line parameters; no configuration file

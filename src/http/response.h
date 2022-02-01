@@ -9,7 +9,7 @@ static int resp_open(struct client *c)
 static void resp_close(struct client *c)
 {
 	ffstr_free(&c->resp.last_modified);
-	sv_timer(c->srv, &c->resp.timer, 0, NULL, NULL);
+	sv_timer_stop(c->srv, &c->resp.timer);
 }
 
 static int resp_prepare(struct client *c);
@@ -53,14 +53,14 @@ static int resp_prepare(struct client *c)
 		d += ffhttp_hdr_write(d, end - d, name, val);
 	}
 
+	d += _ffs_copycz(d, end - d, "Server: alphahttpd\r\n");
+
 	ffstr_setz(&name, "Connection");
 	if (c->resp_connection_keepalive)
 		ffstr_setz(&val, "keep-alive");
 	else
 		ffstr_setz(&val, "close");
 	d += ffhttp_hdr_write(d, end - d, name, val);
-
-	d += _ffs_copycz(d, end - d, "Server: alphahttpd\r\n");
 
 	*d++ = '\r';
 	*d++ = '\n';
@@ -125,7 +125,7 @@ static int resp_send(struct client *c)
 		}
 	}
 
-	sv_timer(c->srv, &c->resp.timer, 0, NULL, NULL);
+	sv_timer_stop(c->srv, &c->resp.timer);
 	if (c->resp_done)
 		return CHAIN_DONE;
 	return CHAIN_BACK;

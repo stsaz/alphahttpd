@@ -4,7 +4,7 @@
 static int err_open(struct client *c)
 {
 	if (!c->resp_err)
-		return CHAIN_DONE;
+		return CHAIN_SKIP;
 	return CHAIN_FWD;
 }
 
@@ -14,9 +14,11 @@ static void err_close(struct client *c)
 
 static int err_process(struct client *c)
 {
-	ffstr_setstr(&c->output, &c->resp.msg);
-	c->resp.content_length = c->output.len;
+	c->resp.content_length = c->resp.msg.len;
 	c->resp_done = 1;
+	if (c->req_method_head)
+		return CHAIN_DONE;
+	ffstr_setstr(&c->output, &c->resp.msg);
 	return CHAIN_DONE;
 }
 

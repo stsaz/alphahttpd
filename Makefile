@@ -12,7 +12,7 @@ ifeq "$(OPT)" "0"
 	CFLAGS += -DFF_DEBUG -O0 -g
 else
 	CFLAGS += -O3 -fno-strict-aliasing
-	LDFLAGS := -s
+	LINKFLAGS := -s
 endif
 ifneq "$(SSE42)" "0"
 	CFLAGS += -msse4.2
@@ -34,7 +34,7 @@ alphahttpd: \
 		client.o \
 		main.o \
 		server.o
-	$(LINK) $(LDFLAGS) $+ -o $@
+	$(LINK) $(LINKFLAGS) $(LINK_PTHREAD) $+ -o $@
 
 clean:
 	rm -fv alphahttpd *.o
