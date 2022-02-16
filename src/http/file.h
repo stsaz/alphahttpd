@@ -1,7 +1,9 @@
 /** alphahttpd: static file filter/module
 2022, Simon Zolin */
 
+#include <util/ltconf.h>
 #include <FFOS/file.h>
+#include <ffbase/map.h>
 
 static void file_close(struct client *c);
 
@@ -46,6 +48,80 @@ static int mtime(struct client *c, const fffileinfo *fi)
 	return 0;
 }
 
+static ffmap content_types_map;
+static const char content_types_data[] = "\
+image/gif	gif\n\
+image/jpeg	jpg\n\
+image/png	png\n\
+image/svg+xml	svg\n\
+image/webp	webp\n\
+text/css	css\n\
+text/html	htm html\n\
+text/plain	txt\n\
+";
+
+static int ctmap_keyeq(void *opaque, const void *key, ffsize keylen, void *val)
+{
+	ffuint hi = (ffuint64)val >> 32;
+	ffstr k = range16_tostr((range16*)&hi, content_types_data);
+	return ffstr_eq(&k, key, keylen);
+}
+
+void content_types_init()
+{
+	ffmap_init(&content_types_map, ctmap_keyeq);
+	ffmap_alloc(&content_types_map, 9);
+	ffstr in = FFSTR_INITZ(content_types_data), out, ct;
+	struct ltconf conf = {};
+
+	for (;;) {
+		int r = ltconf_read(&conf, &in, &out);
+
+		switch (r) {
+		case LTCONF_KEY:
+			ct = out;
+			break;
+		case LTCONF_VAL: {
+			if (out.len > 4)
+				return;
+			range16 k, v;
+			range16_set(&k, out.ptr - content_types_data, out.len);
+			range16_set(&v, ct.ptr - content_types_data, ct.len);
+			ffuint64 val = FFINT_JOIN64(*(uint*)&k, *(uint*)&v);
+			ffmap_add(&content_types_map, out.ptr, out.len, (void*)val);
+			break;
+		}
+
+		case LTCONF_MORE:
+		case LTCONF_ERROR:
+		default:
+			return;
+		}
+	}
+}
+
+static void content_type(struct client *c)
+{
+	ffstr x;
+	int r = ffpath_splitname(c->file.buf.ptr, c->file.buf.len, NULL, &x);
+	if (r <= 0 || ((char*)c->file.buf.ptr)[r] == '/' || x.len > 4)
+		goto unknown;
+
+	char lx[4];
+	ffs_lower(lx, 4, x.ptr, x.len);
+	void *val = ffmap_find(&content_types_map, lx, x.len, NULL);
+	if (val == NULL)
+		goto unknown;
+
+	ffuint lo = (ffuint64)val;
+	ffstr v = range16_tostr((range16*)&lo, content_types_data);
+	ffstr_setstr(&c->resp.content_type, &v);
+	return;
+
+unknown:
+	ffstr_setz(&c->resp.content_type, "application/octet-stream");
+}
+
 static int file_open(struct client *c)
 {
 	if (c->resp_err)
@@ -69,9 +145,10 @@ static int file_open(struct client *c)
 		cl_resp_status(c, HTTP_500_INTERNAL_SERVER_ERROR);
 		return -1;
 	}
-	ffstr_add2((ffstr*)&c->file.buf, -1, &ahd_conf->www);
-	ffstr_add2((ffstr*)&c->file.buf, -1, &c->req.unescaped_path);
-	ffstr_addchar((ffstr*)&c->file.buf, -1, '\0');
+	ffstr *fn = (ffstr*)&c->file.buf;
+	ffstr_add2(fn, -1, &ahd_conf->www);
+	ffstr_add2(fn, -1, &c->req.unescaped_path);
+	fn->ptr[fn->len] = '\0';
 
 	const char *fname = c->file.buf.ptr;
 	if (FFFILE_NULL == (c->file.f = fffile_open(fname, FFFILE_READONLY | FFFILE_NOATIME))) {
@@ -95,6 +172,7 @@ static int file_open(struct client *c)
 		goto done;
 	if (0 != mtime(c, &fi))
 		goto done;
+	content_type(c);
 
 	c->resp.content_length = fffileinfo_size(&fi);
 	cl_resp_status_ok(c, HTTP_200_OK);

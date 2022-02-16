@@ -53,6 +53,12 @@ static int resp_prepare(struct client *c)
 		d += ffhttp_hdr_write(d, end - d, name, val);
 	}
 
+	if (c->resp.content_type.len != 0) {
+		ffstr_setz(&name, "Content-Type");
+		ffstr_setstr(&val, &c->resp.content_type);
+		d += ffhttp_hdr_write(d, end - d, name, val);
+	}
+
 	d += _ffs_copycz(d, end - d, "Server: alphahttpd\r\n");
 
 	ffstr_setz(&name, "Connection");

@@ -80,7 +80,7 @@ struct client {
 	struct {
 		uint code;
 		ffuint64 content_length;
-		ffstr msg, location;
+		ffstr msg, location, content_type;
 		ffstr last_modified;
 		ffvec buf;
 		ffuint64 transferred;
@@ -142,6 +142,11 @@ do { \
 #include <http/transfer.h>
 #include <http/response.h>
 #include <http/access-log.h>
+
+void http_mods_init()
+{
+	content_types_init();
+}
 
 void cl_start(struct ahd_kev *kev, ffsock csock, const ffsockaddr *peer, struct server *s)
 {

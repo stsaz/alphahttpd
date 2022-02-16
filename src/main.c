@@ -67,10 +67,11 @@ int main(int argc, char **argv)
 		setrlimit(RLIMIT_NOFILE, &rl);
 	}
 
-	ffsock_init(FFSOCK_INIT_SIGPIPE);
-
 	boss = ffmem_new(struct ahd_boss);
 	boss->req_id = 1;
+
+	ffsock_init(FFSOCK_INIT_SIGPIPE);
+	http_mods_init();
 
 	ffvec_allocT(&boss->workers, ahd_conf->workers_n, void*);
 	boss->workers.len = ahd_conf->workers_n;

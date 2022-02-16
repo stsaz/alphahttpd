@@ -10,7 +10,7 @@ Current features and limitations:
 * Uses `index.html` as index file
 * Doesn't use sendfile()
 * No caching
-* No ETag, Content-Type, If-None-Match, Range
+* No ETag, If-None-Match, Range
 * Multi-threaded, uses all CPUs by default
 * stdout/stderr logging only
 * SSE-optimized HTTP parser

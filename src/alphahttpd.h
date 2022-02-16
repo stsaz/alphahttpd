@@ -88,5 +88,8 @@ level: enum LOG */
 void ahd_log(struct server *s, uint level, const char *id, const char *fmt, ...);
 
 
+/** Initialize HTTP modules */
+void http_mods_init();
+
 /** Start processing the client */
 void cl_start(struct ahd_kev *kev, ffsock csock, const ffsockaddr *peer, struct server *s);
