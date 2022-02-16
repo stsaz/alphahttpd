@@ -8,7 +8,6 @@
 #include <FFOS/timer.h>
 #include <FFOS/perf.h>
 #include <FFOS/thread.h>
-#include <ffbase/atomic.h>
 
 struct server {
 	struct ahd_kev kev;
@@ -19,6 +18,7 @@ struct server {
 	ffkq kq;
 	ffkq_event *kevents;
 	struct ahd_kev *connections;
+	uint connections_n;
 	struct ahd_kev *reusable_connections_lifo;
 	uint iconn, conn_num;
 	ahd_timer tmr_fdlimit;
@@ -26,6 +26,9 @@ struct server {
 	ffkq_postevent kqpost;
 	uint worker_stop;
 	uint log_level;
+
+	struct ffkcallqueue kcq;
+	struct ahd_kev kcq_kev;
 
 	fftimer timer;
 	fftimerqueue timer_q;
@@ -38,6 +41,7 @@ struct server {
 static void sv_accept(struct server *s);
 static int sv_timer_start(struct server *s);
 static int sv_worker(struct server *s);
+static void kcq_onsignal(struct server *s);
 
 #define sv_sysfatallog(s, ...) \
 	ahd_log(s, LOG_SYSFATAL, NULL, __VA_ARGS__)
@@ -47,6 +51,9 @@ static int sv_worker(struct server *s);
 
 #define sv_errlog(s, ...) \
 	ahd_log(s, LOG_ERR, NULL, __VA_ARGS__)
+
+#define sv_warnlog(s, ...) \
+	ahd_log(s, LOG_WARN, NULL, __VA_ARGS__)
 
 #define sv_verblog(s, ...) \
 do { \
@@ -82,16 +89,26 @@ int sv_start(struct server *s)
 
 void sv_stop(struct server *s)
 {
+	if (s->worker_stop)
+		return;
+	sv_dbglog(s, "stopping kq worker");
 	FFINT_WRITEONCE(s->worker_stop, 1);
+	ffcpu_fence_release();
 	ffkq_post(s->kqpost, &s->post_kev);
 	if (s->thd != FFTHREAD_NULL) {
 		ffthread_join(s->thd, -1, NULL);
 	}
 }
 
+#ifdef FF_LINUX
+typedef cpu_set_t _cpuset;
+#else
+typedef cpuset_t _cpuset;
+#endif
+
 void sv_cpu_affinity(struct server *s, uint icpu)
 {
-	cpu_set_t cpuset;
+	_cpuset cpuset;
 	CPU_ZERO(&cpuset);
 	CPU_SET(icpu, &cpuset);
 	ffthread t = (s->thd != FFTHREAD_NULL) ? s->thd : pthread_self();
@@ -102,26 +119,8 @@ void sv_cpu_affinity(struct server *s, uint icpu)
 	sv_dbglog(s, "CPU affinity: %u", icpu);
 }
 
-int FFTHREAD_PROCCALL sv_run(struct server *s)
+static int lsock_prepare(struct server *s)
 {
-	s->thd_id = ffthread_curid();
-
-	s->connections = (void*)ffmem_alloc(ahd_conf->max_connections * sizeof(struct ahd_kev));
-	s->kevents = (void*)ffmem_alloc(ahd_conf->events_num * sizeof(ffkq_event));
-	if (s->connections == NULL || s->kevents == NULL) {
-		sv_sysfatallog(s, "no memory");
-		return -1;
-	}
-
-	if (FFKQ_NULL == (s->kq = ffkq_create())) {
-		sv_sysfatallog(s, "ffkq_create");
-		return -1;
-	}
-	if (FFKQ_NULL == (s->kqpost = ffkq_post_attach(s->kq, &s->post_kev))) {
-		sv_sysfatallog(s, "ffkq_post_attach");
-		return -1;
-	}
-
 	const void *ip4 = ffip6_tov4((void*)ahd_conf->bind_ip);
 	int fam = (ip4 != NULL) ? AF_INET : AF_INET6;
 	if (FFSOCK_NULL == (s->lsock = ffsock_create_tcp(fam, FFSOCK_NONBLOCK))) {
@@ -159,6 +158,56 @@ int FFTHREAD_PROCCALL sv_run(struct server *s)
 		sv_sysfatallog(s, "socket listen");
 		return -1;
 	}
+	return 0;
+}
+
+static int kcq_init(struct server *s)
+{
+	s->kcq.sq = s->boss->kcq_sq;
+	s->kcq.sem = s->boss->kcq_sem;
+	if (NULL == (s->kcq.cq = ffrq_alloc(s->connections_n))) {
+		sv_sysfatallog(s, "ffrq_alloc");
+		return -1;
+	}
+	if (ahd_conf->polling_mode) {
+		s->kcq.kqpost = FFKQ_NULL;
+		return 0;
+	}
+
+	s->kcq_kev.rhandler = (ahd_kev_func)kcq_onsignal;
+	s->kcq_kev.obj = s;
+	if (FFKQ_NULL == (s->kcq.kqpost = ffkq_post_attach(s->kq, &s->kcq_kev))) {
+		sv_sysfatallog(s, "ffkq_post_attach");
+		return -1;
+	}
+	s->kcq.kqpost_data = &s->kcq_kev;
+	return 0;
+}
+
+int FFTHREAD_PROCCALL sv_run(struct server *s)
+{
+	s->thd_id = ffthread_curid();
+
+	s->connections_n = ahd_conf->max_connections / s->boss->workers.len;
+	s->connections = (void*)ffmem_alloc(s->connections_n * sizeof(struct ahd_kev));
+	s->kevents = (void*)ffmem_alloc(ahd_conf->events_num * sizeof(ffkq_event));
+	if (s->connections == NULL || s->kevents == NULL) {
+		sv_sysfatallog(s, "no memory");
+		return -1;
+	}
+	ffmem_zero(s->connections, s->connections_n * sizeof(struct ahd_kev));
+
+	if (FFKQ_NULL == (s->kq = ffkq_create())) {
+		sv_sysfatallog(s, "ffkq_create");
+		return -1;
+	}
+	if (FFKQ_NULL == (s->kqpost = ffkq_post_attach(s->kq, &s->post_kev))) {
+		sv_sysfatallog(s, "ffkq_post_attach");
+		return -1;
+	}
+
+	if (0 != lsock_prepare(s))
+		return -1;
 
 	s->kev.rhandler = (ahd_kev_func)sv_accept;
 	s->kev.obj = s;
@@ -170,6 +219,9 @@ int FFTHREAD_PROCCALL sv_run(struct server *s)
 	if (0 != sv_timer_start(s))
 		return -1;
 
+	if (0 != kcq_init(s))
+		return -1;
+
 	sv_verblog(s, "listening on %u", ahd_conf->listen_port);
 	sv_worker(s);
 	return 0;
@@ -177,6 +229,7 @@ int FFTHREAD_PROCCALL sv_run(struct server *s)
 
 void sv_free(struct server *s)
 {
+	ffrq_free(s->kcq.cq);
 	fftimer_close(s->timer, s->kq);
 	ffsock_close(s->lsock);
 	ffkq_close(s->kq);
@@ -185,15 +238,10 @@ void sv_free(struct server *s)
 	ffmem_free(s);
 }
 
-uint sv_req_id_next(struct server *s)
-{
-	return ffint_fetch_add(&s->boss->req_id, 1);
-}
-
 static int sv_accept1(struct server *s)
 {
-	if (s->conn_num == ahd_conf->max_connections) {
-		sv_errlog(s, "reached max parallel connections limit %u", ahd_conf->max_connections);
+	if (s->conn_num == s->connections_n) {
+		sv_warnlog(s, "reached max worker connections limit %u", s->connections_n);
 		sv_timer(s, &s->tmr_fdlimit, -(int)ahd_conf->fdlimit_timeout_sec*1000, (fftimerqueue_func)sv_accept, s);
 		return -1;
 	}
@@ -224,8 +272,11 @@ static int sv_accept1(struct server *s)
 	sv_dbglog(s, "using connection slot #%u [%u]"
 		, (uint)(kev - s->connections), s->conn_num + 1);
 
+	uint conn_id = ffint_fetch_add(&s->boss->conn_id, 1);
+
 	s->conn_num++;
-	cl_start(kev, csock, &peer, s);
+	kev->kcall.q = &s->kcq;
+	cl_start(kev, csock, &peer, s, conn_id);
 	return 0;
 }
 
@@ -239,8 +290,12 @@ static void sv_accept(struct server *s)
 
 static int sv_worker(struct server *s)
 {
+	sv_dbglog(s, "entering kq loop");
 	ffkq_time t;
 	ffkq_time_set(&t, -1);
+	if (ahd_conf->polling_mode)
+		ffkq_time_set(&t, 0);
+
 	while (!FFINT_READONCE(s->worker_stop)) {
 		int r = ffkq_wait(s->kq, s->kevents, ahd_conf->events_num, t);
 
@@ -263,6 +318,8 @@ static int sv_worker(struct server *s)
 			sv_sysfatallog(s, "ffkq_wait");
 			return -1;
 		}
+
+		ffkcallq_process_cq(s->kcq.cq);
 	}
 	sv_dbglog(s, "leaving kq loop");
 	return 0;
@@ -355,4 +412,10 @@ void sv_timer(struct server *s, ahd_timer *tmr, int interval_msec, fftimerqueue_
 
 	fftimerqueue_add(&s->timer_q, tmr, s->timer_now_ms, interval_msec, func, param);
 	sv_dbglog(s, "timer add: %p %d", tmr, interval_msec);
+}
+
+
+static void kcq_onsignal(struct server *s)
+{
+	ffkcallq_process_cq(s->kcq.cq);
 }

@@ -2,10 +2,46 @@
 2022, Simon Zolin */
 
 #include <util/ltconf.h>
-#include <FFOS/file.h>
 #include <ffbase/map.h>
 
-static void file_close(struct client *c);
+static int file_open(struct client *c)
+{
+	if (c->resp_err)
+		return CHAIN_SKIP;
+
+	c->file.f = FFFILE_NULL;
+
+	ffstr method = range16_tostr(&c->req.method, c->req.buf.ptr);
+	if (!(ffstr_eqz(&method, "GET")
+			|| (c->req_method_head = ffstr_eqz(&method, "HEAD")))) {
+		cl_resp_status(c, HTTP_405_METHOD_NOT_ALLOWED);
+		return CHAIN_SKIP;
+	}
+
+	if (ahd_conf->www.len + c->req.unescaped_path.len + 1 > ahd_conf->file_buf_size) {
+		cl_warnlog(c, "too small file buffer");
+		return CHAIN_ERR;
+	}
+	if (NULL == ffvec_alloc(&c->file.buf, ahd_conf->file_buf_size, 1)) {
+		cl_errlog(c, "no memory");
+		cl_resp_status(c, HTTP_500_INTERNAL_SERVER_ERROR);
+		return CHAIN_SKIP;
+	}
+	ffstr *fn = (ffstr*)&c->file.buf;
+	ffstr_add2(fn, -1, &ahd_conf->www);
+	ffstr_add2(fn, -1, &c->req.unescaped_path);
+	fn->ptr[fn->len] = '\0';
+
+	return CHAIN_FWD;
+}
+
+static void file_close(struct client *c)
+{
+	if (c->file.f != FFFILE_NULL) {
+		fffile_close(c->file.f);
+	}
+	ffvec_free(&c->file.buf);
+}
 
 static int handle_redirect(struct client *c, const fffileinfo *fi)
 {
@@ -71,7 +107,7 @@ void content_types_init()
 {
 	ffmap_init(&content_types_map, ctmap_keyeq);
 	ffmap_alloc(&content_types_map, 9);
-	ffstr in = FFSTR_INITZ(content_types_data), out, ct;
+	ffstr in = FFSTR_INITZ(content_types_data), out, ct = {};
 	struct ltconf conf = {};
 
 	for (;;) {
@@ -122,87 +158,100 @@ unknown:
 	ffstr_setz(&c->resp.content_type, "application/octet-stream");
 }
 
-static int file_open(struct client *c)
+static int f_open(struct client *c)
 {
-	if (c->resp_err)
-		return CHAIN_SKIP;
-
-	c->file.f = FFFILE_NULL;
-
-	ffstr method = range16_tostr(&c->req.method, c->req.buf.ptr);
-	if (!(ffstr_eqz(&method, "GET")
-			|| (c->req_method_head = ffstr_eqz(&method, "HEAD")))) {
-		cl_resp_status(c, HTTP_405_METHOD_NOT_ALLOWED);
-		goto done;
-	}
-
-	if (ahd_conf->www.len + c->req.unescaped_path.len + 1 > ahd_conf->file_buf_size) {
-		cl_warnlog(c, "too small file buffer");
-		goto err;
-	}
-	if (NULL == ffvec_alloc(&c->file.buf, ahd_conf->file_buf_size, 1)) {
-		cl_errlog(c, "no memory");
-		cl_resp_status(c, HTTP_500_INTERNAL_SERVER_ERROR);
+	const char *fname = c->file.buf.ptr;
+	if (c->kev->kcall.handler != NULL) {
+		c->kev->kcall.handler = NULL;
+		cl_dbglog(c, "fffile_open: completed");
+		cl_chain_process(c);
 		return -1;
 	}
-	ffstr *fn = (ffstr*)&c->file.buf;
-	ffstr_add2(fn, -1, &ahd_conf->www);
-	ffstr_add2(fn, -1, &c->req.unescaped_path);
-	fn->ptr[fn->len] = '\0';
 
-	const char *fname = c->file.buf.ptr;
-	if (FFFILE_NULL == (c->file.f = fffile_open(fname, FFFILE_READONLY | FFFILE_NOATIME))) {
+	if (FFFILE_NULL == (c->file.f = fffile_open_async(fname, FFFILE_READONLY | FFFILE_NOATIME, &c->kev->kcall))) {
 		if (fferr_notexist(fferr_last())) {
 			cl_dbglog(c, "fffile_open: %s: not found", fname);
 			cl_resp_status(c, HTTP_404_NOT_FOUND);
-			goto done;
+			return CHAIN_DONE;
+		} else if (fferr_last() == EINPROGRESS) {
+			cl_dbglog(c, "fffile_open: %s: in progress", fname);
+			c->kev->kcall.handler = (void*)f_open;
+			return CHAIN_ASYNC;
 		}
 		cl_syswarnlog(c, "fffile_open: %s", fname);
-		goto err;
-	}
-
-	fffileinfo fi;
-	if (0 != fffile_info(c->file.f, &fi)) {
-		cl_syswarnlog(c, "fffile_info: %s", fname);
-		cl_resp_status(c, HTTP_403_FORBIDDEN);
-		goto done;
-	}
-
-	if (0 != handle_redirect(c, &fi))
-		goto done;
-	if (0 != mtime(c, &fi))
-		goto done;
-	content_type(c);
-
-	c->resp.content_length = fffileinfo_size(&fi);
-	cl_resp_status_ok(c, HTTP_200_OK);
-
-	if (method.ptr[0] == 'H') { // HEAD
-		c->resp_done = 1;
-		goto done;
+		cl_resp_status(c, HTTP_500_INTERNAL_SERVER_ERROR);
+		return CHAIN_DONE;
 	}
 
 	return CHAIN_FWD;
-
-err:
-	file_close(c);
-	return CHAIN_ERR;
-
-done:
-	file_close(c);
-	return CHAIN_SKIP;
 }
 
-static void file_close(struct client *c)
+static int f_info(struct client *c)
 {
-	fffile_close(c->file.f);
-	ffvec_free(&c->file.buf);
+	if (c->kev->kcall.handler != NULL) {
+		c->kev->kcall.handler = NULL;
+		cl_dbglog(c, "fffile_info: completed");
+		cl_chain_process(c);
+		return -1;
+	}
+
+	if (0 != fffile_info_async(c->file.f, &c->file.info, &c->kev->kcall)) {
+		if (fferr_last() == EINPROGRESS) {
+			cl_dbglog(c, "fffile_info: in progress");
+			c->kev->kcall.handler = (void*)f_info;
+			return CHAIN_ASYNC;
+		}
+		cl_syswarnlog(c, "fffile_info: %s", c->file.buf.ptr);
+		cl_resp_status(c, HTTP_403_FORBIDDEN);
+		return CHAIN_DONE;
+	}
+
+	if (0 != handle_redirect(c, &c->file.info))
+		return CHAIN_DONE;
+	if (0 != mtime(c, &c->file.info))
+		return CHAIN_DONE;
+	content_type(c);
+
+	c->resp.content_length = fffileinfo_size(&c->file.info);
+	cl_resp_status_ok(c, HTTP_200_OK);
+
+	if (c->req_method_head) {
+		c->resp_done = 1;
+		return CHAIN_DONE;
+	}
+
+	return CHAIN_FWD;
 }
 
 static int file_process(struct client *c)
 {
-	ffssize r = fffile_read(c->file.f, c->file.buf.ptr, c->file.buf.cap);
+	ffssize r;
+	switch (c->file.state) {
+	case 0:
+		if (CHAIN_FWD != (r = f_open(c)))
+			return r;
+		c->file.state = 1;
+		// fallthrough
+	case 1:
+		if (CHAIN_FWD != (r = f_info(c)))
+			return r;
+		c->file.state = 2;
+	}
+
+	if (c->kev->kcall.handler != NULL) {
+		c->kev->kcall.handler = NULL;
+		cl_dbglog(c, "fffile_read: completed");
+		cl_chain_process(c);
+		return -1;
+	}
+
+	r = fffile_read_async(c->file.f, c->file.buf.ptr, c->file.buf.cap, &c->kev->kcall);
 	if (r < 0) {
+		if (fferr_last() == EINPROGRESS) {
+			cl_dbglog(c, "fffile_read: in progress");
+			c->kev->kcall.handler = (void*)file_process;
+			return CHAIN_ASYNC;
+		}
 		cl_syswarnlog(c, "fffile_read");
 		return CHAIN_ERR;
 	} else if (r == 0) {

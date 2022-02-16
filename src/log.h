@@ -58,8 +58,5 @@ void ahd_log(struct server *s, uint level, const char *id, const char *fmt, ...)
 	}
 
 	buf[r++] = '\n';
-	if (level <= LOG_WARN)
-		ffstderr_write(buf, r);
-	else
-		ffstdout_write(buf, r);
+	ffstdout_write(buf, r);
 }

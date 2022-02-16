@@ -11,6 +11,7 @@ request -> index -> file/error <-> content-length <-> response -> access-log
 #include <util/ipaddr.h>
 #include <util/range.h>
 #include <FFOS/socket.h>
+#include <FFOS/file.h>
 #include <ffbase/vector.h>
 
 enum {
@@ -56,10 +57,11 @@ struct client {
 	ushort keep_alive_n;
 	unsigned send_init :1;
 	unsigned kq_attached :1;
+	unsigned req_unprocessed_data :1;
+	char id[12]; // "*ID"
 
 	// next data is cleared before each keep-alive/pipeline request
 
-	char id[12]; // "*ID"
 	ffuint64 start_time_msec;
 
 	struct {
@@ -73,7 +75,11 @@ struct client {
 	struct {
 		fffd f;
 		ffvec buf;
+		fffileinfo info;
+		uint state;
 	} file;
+
+	ffstr acclog_buf;
 
 	ffuint64 conlen;
 
@@ -94,10 +100,10 @@ struct client {
 
 	unsigned chain_back :1;
 	unsigned req_method_head :1;
-	unsigned req_unprocessed_data :1;
 	unsigned resp_connection_keepalive :1;
 	unsigned resp_err :1;
 	unsigned resp_done :1;
+	unsigned ka :1;
 
 	uint imod;
 	struct {
@@ -148,9 +154,9 @@ void http_mods_init()
 	content_types_init();
 }
 
-void cl_start(struct ahd_kev *kev, ffsock csock, const ffsockaddr *peer, struct server *s)
+void cl_start(struct ahd_kev *kev, ffsock csock, const ffsockaddr *peer, struct server *s, uint conn_id)
 {
-	struct client *c = ffmem_alloc(sizeof(struct client) + ahd_conf->read_buf_size + ahd_conf->write_buf_size);
+	struct client *c = ffmem_alloc(sizeof(struct client));
 	if (c == NULL) {
 		ahd_log(s, LOG_ERR, NULL, "no memory");
 		return;
@@ -160,16 +166,23 @@ void cl_start(struct ahd_kev *kev, ffsock csock, const ffsockaddr *peer, struct 
 	c->srv = s;
 	c->kev = kev;
 	c->log_level = ahd_conf->log_level;
+	c->kev->kcall.param = c;
+
+	c->id[0] = '*';
+	int r = ffs_fromint(conn_id, c->id+1, sizeof(c->id)-1, 0);
+	c->id[r+1] = '\0';
 
 	uint port = 0;
 	ffslice ip = ffsockaddr_ip_port(peer, &port);
 	ffmem_copy(c->peer_ip, ip.ptr, ip.len);
 	c->peer_port = port;
 
-	char buf[FFIP6_STRLEN];
-	int r = ffip46_tostr((void*)c->peer_ip, buf, sizeof(buf));
-	cl_verblog(c, "new client connection: %*s:%u"
-		, (ffsize)r, buf, c->peer_port);
+	if (c->log_level >= LOG_VERB) {
+		char buf[FFIP6_STRLEN];
+		r = ffip46_tostr((void*)c->peer_ip, buf, sizeof(buf));
+		cl_verblog(c, "new client connection: %*s:%u"
+			, (ffsize)r, buf, c->peer_port);
+	}
 
 	cl_init(c);
 	cl_chain_process(c);
@@ -177,16 +190,6 @@ void cl_start(struct ahd_kev *kev, ffsock csock, const ffsockaddr *peer, struct 
 
 static void cl_init(struct client *c)
 {
-	c->id[0] = '*';
-	uint id = sv_req_id_next(c->srv);
-	int r = ffs_fromint(id, c->id+1, sizeof(c->id)-1, 0);
-	c->id[r+1] = '\0';
-
-	c->req.buf.ptr = c+1;
-	c->req.buf.cap = ahd_conf->read_buf_size;
-	c->resp.buf.ptr = (char*)c->req.buf.ptr + ahd_conf->read_buf_size;
-	c->resp.buf.cap = ahd_conf->write_buf_size;
-
 	c->resp.content_length = (ffuint64)-1;
 }
 
@@ -200,8 +203,9 @@ static void cl_mods_close(struct client *c)
 
 static void cl_destroy(struct client *c)
 {
-	cl_dbglog(c, "closing client connection");
+	cl_verblog(c, "closing client connection");
 	ffsock_close(c->sk);
+	ffkcall_cancel(&c->kev->kcall);
 
 	cl_mods_close(c);
 	sv_conn_fin(c->srv, c->kev);
@@ -210,16 +214,16 @@ static void cl_destroy(struct client *c)
 
 static void cl_reset(struct client *c)
 {
+	c->ka = 1;
 	cl_mods_close(c);
 
-	uint req_len = c->req.full.len, buf_len = c->req.buf.len;
-	ffmem_zero(c->id, sizeof(*c) - FF_OFF(struct client, id));
+	ffvec rb = c->req.buf; // preserve pipelined data
+
+	ffmem_zero(&c->start_time_msec, sizeof(*c) - FF_OFF(struct client, start_time_msec));
+	ffkcall_cancel(&c->kev->kcall);
 	cl_init(c);
 
-	// preserve pipelined data
-	c->req.buf.len = buf_len;
-	ffstr_erase_left((ffstr*)&c->req.buf, req_len);
-	c->req_unprocessed_data = (c->req.buf.len != 0);
+	c->req.buf = rb;
 }
 
 static int cl_keepalive(struct client *c)
@@ -238,9 +242,9 @@ static void cl_chain_process(struct client *c)
 	int i = c->imod, r;
 	for (;;) {
 		if (!c->mdata[i].opened) {
-			cl_dbglog(c, "opening module %u", i);
+			// cl_dbglog(c, "opening module %u", i);
 			r = mods[i]->open(c);
-			cl_dbglog(c, "  module %u returned: %u", i, r);
+			// cl_dbglog(c, "  module %u returned: %u", i, r);
 			if (r == CHAIN_SKIP || r == CHAIN_ERR) {
 				c->mdata[i].done = 1;
 				c->output = c->input;
@@ -250,9 +254,9 @@ static void cl_chain_process(struct client *c)
 		}
 
 		if (!c->mdata[i].done) {
-			cl_dbglog(c, "calling module %u input:%L", i, c->input.len);
+			// cl_dbglog(c, "calling module %u input:%L", i, c->input.len);
 			r = mods[i]->process(c);
-			cl_dbglog(c, "  module %u returned: %u  output:%L", i, r, c->output.len);
+			// cl_dbglog(c, "  module %u returned: %u  output:%L", i, r, c->output.len);
 		} else {
 			r = (!c->chain_back) ? CHAIN_FWD : CHAIN_BACK;
 		}

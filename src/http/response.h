@@ -3,11 +3,16 @@
 
 static int resp_open(struct client *c)
 {
+	if (NULL == ffvec_alloc(&c->resp.buf, ahd_conf->write_buf_size, 1)) {
+		cl_syswarnlog(c, "no memory");
+		return CHAIN_ERR;
+	}
 	return CHAIN_FWD;
 }
 
 static void resp_close(struct client *c)
 {
+	ffvec_free(&c->resp.buf);
 	ffstr_free(&c->resp.last_modified);
 	sv_timer_stop(c->srv, &c->resp.timer);
 }
@@ -27,9 +32,9 @@ static int resp_prepare(struct client *c)
 {
 	char *d = (char*)c->resp.buf.ptr, *end = (char*)c->resp.buf.ptr + c->resp.buf.cap - 2;
 
-	int r = ffhttp_resp_write(d, end - d, c->resp.code, c->resp.msg);
+	int r = http_resp_write(d, end - d, c->resp.code, c->resp.msg);
 	if (r < 0) {
-		cl_warnlog(c, "ffhttp_resp_write");
+		cl_warnlog(c, "http_resp_write");
 		return -1;
 	}
 	d += r;
@@ -44,19 +49,19 @@ static int resp_prepare(struct client *c)
 	if (c->resp.location.len != 0) {
 		ffstr_setz(&name, "Location");
 		ffstr_setstr(&val, &c->resp.location);
-		d += ffhttp_hdr_write(d, end - d, name, val);
+		d += http_hdr_write(d, end - d, name, val);
 	}
 
 	if (c->resp.last_modified.len != 0) {
 		ffstr_setz(&name, "Last-Modified");
 		ffstr_setstr(&val, &c->resp.last_modified);
-		d += ffhttp_hdr_write(d, end - d, name, val);
+		d += http_hdr_write(d, end - d, name, val);
 	}
 
 	if (c->resp.content_type.len != 0) {
 		ffstr_setz(&name, "Content-Type");
 		ffstr_setstr(&val, &c->resp.content_type);
-		d += ffhttp_hdr_write(d, end - d, name, val);
+		d += http_hdr_write(d, end - d, name, val);
 	}
 
 	d += _ffs_copycz(d, end - d, "Server: alphahttpd\r\n");
@@ -66,7 +71,7 @@ static int resp_prepare(struct client *c)
 		ffstr_setz(&val, "keep-alive");
 	else
 		ffstr_setz(&val, "close");
-	d += ffhttp_hdr_write(d, end - d, name, val);
+	d += http_hdr_write(d, end - d, name, val);
 
 	*d++ = '\r';
 	*d++ = '\n';

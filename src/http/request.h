@@ -13,6 +13,13 @@ static int req_open(struct client *c)
 
 static void req_close(struct client *c)
 {
+	if (c->ka) {
+		// preserve pipelined data
+		ffstr_erase_left((ffstr*)&c->req.buf, c->req.full.len);
+		c->req_unprocessed_data = (c->req.buf.len != 0);
+	} else {
+		ffvec_free(&c->req.buf);
+	}
 	ffstr_free(&c->req.unescaped_path);
 	sv_timer_stop(c->srv, &c->req.timer);
 }
@@ -33,7 +40,6 @@ static int req_read(struct client *c)
 
 	if (c->req_unprocessed_data) {
 		c->req_unprocessed_data = 0;
-		c->req.transferred = c->req.buf.len;
 		if (0 == req_parse(c))
 			return CHAIN_FWD;
 	}
@@ -48,13 +54,21 @@ static int req_read(struct client *c)
 				sv_timer(c->srv, &c->req.timer, ahd_conf->read_timeout_sec*1000, (fftimerqueue_func)req_read_expired, c);
 				return CHAIN_ASYNC;
 			}
-			cl_syswarnlog(c, "ffsock_recv");
+			if (!(c->req.buf.len == 0 && fferr_last() == ECONNRESET))
+				cl_syswarnlog(c, "ffsock_recv");
 			return CHAIN_ERR;
 		}
 
 		cl_dbglog(c, "ffsock_recv: %u", r);
 
 		if (r == 0) {
+			if (c->req.buf.cap == 0) {
+				if (NULL == ffvec_alloc(&c->req.buf, ahd_conf->read_buf_size, 1)) {
+					cl_syswarnlog(c, "no memory");
+					return CHAIN_ERR;
+				}
+				continue;
+			}
 			if (c->req.buf.len != 0)
 				cl_warnlog(c, "peer closed connection before finishing request");
 			return CHAIN_FIN;
@@ -75,18 +89,6 @@ static int req_read(struct client *c)
 	}
 }
 
-static int crlf_skip(ffstr *d)
-{
-	if (d->len >= 2 && d->ptr[0] == '\r' && d->ptr[1] == '\n') {
-		ffstr_shift(d, 2);
-		return 1;
-	} else if (d->len >= 1 && d->ptr[0] == '\n') {
-		ffstr_shift(d, 1);
-		return 1;
-	}
-	return 0;
-}
-
 /**
 Return 0 if request is complete
  >0 if need more data */
@@ -105,7 +107,7 @@ static int req_parse(struct client *c)
 	if (c->log_level >= LOG_DBG)
 		t_begin = fftime_monotonic();
 
-	r = ffhttp_req_parse(req, &method, &url, &proto);
+	r = http_req_parse(req, &method, &url, &proto);
 	if (r == 0)
 		return 1;
 	else if (r < 0) {
@@ -118,14 +120,12 @@ static int req_parse(struct client *c)
 		c->req.line.len--;
 	ffstr_shift(&req, r);
 
+	ffstr name = {}, val = {};
 	for (;;) {
-		ffstr name, val;
-		r = ffhttp_hdr_parse(req, &name, &val);
+		r = http_hdr_parse(req, &name, &val);
 		if (r == 0) {
 			return 1;
 		} else if (r < 0) {
-			if (crlf_skip(&req))
-				break;
 			cl_warnlog(c, "bad header");
 			// cl_dbglog(c, "full request data: %S", &c->req.buf);
 			cl_resp_status(c, HTTP_400_BAD_REQUEST);
@@ -133,6 +133,8 @@ static int req_parse(struct client *c)
 		}
 		ffstr_shift(&req, r);
 
+		if (r <= 2)
+			break;
 		if (ffstr_ieqcz(&name, "Host") && c->req.host.len == 0) {
 			range16_set(&c->req.host, val.ptr - buf, val.len);
 		} else if (ffstr_ieqcz(&name, "Connection")) {
@@ -144,6 +146,8 @@ static int req_parse(struct client *c)
 			range16_set(&c->req.if_modified_since, val.ptr - buf, val.len);
 		}
 	}
+
+	cl_dbglog(c, "request: [%u] %*s", (int)(req.ptr - buf), req.ptr - buf, buf);
 
 	range16_set(&c->req.full, 0, req.ptr - buf);
 
@@ -159,18 +163,22 @@ static int req_parse(struct client *c)
 		return 0;
 	}
 
-	struct ffhttpurl_parts parts = {};
-	ffhttpurl_split(&parts, url);
+	struct httpurl_parts parts = {};
+	httpurl_split(&parts, url);
 
-	r = ffhttpurl_unescape(NULL, 0, parts.path);
+	range16_set(&c->req.method, method.ptr - buf, method.len);
+	range16_set(&c->req.path, parts.path.ptr - buf, parts.path.len);
+	range16_set(&c->req.querystr, parts.query.ptr - buf, parts.query.len);
+
+	r = httpurl_unescape(NULL, 0, parts.path);
 	if (NULL == ffstr_alloc(&c->req.unescaped_path, r)) {
 		cl_errlog(c, "no memory");
 		cl_resp_status(c, HTTP_500_INTERNAL_SERVER_ERROR);
 		return 0;
 	}
-	r = ffhttpurl_unescape(c->req.unescaped_path.ptr, r, parts.path);
+	r = httpurl_unescape(c->req.unescaped_path.ptr, r, parts.path);
 	if (r <= 0) {
-		cl_warnlog(c, "ffhttpurl_unescape");
+		cl_warnlog(c, "httpurl_unescape");
 		cl_resp_status(c, HTTP_400_BAD_REQUEST);
 		return 0;
 	}
@@ -182,11 +190,6 @@ static int req_parse(struct client *c)
 		return 0;
 	}
 	c->req.unescaped_path.len = r;
-
-	cl_dbglog(c, "request: [%u] %*s", (int)(req.ptr - buf), req.ptr - buf, buf);
-	range16_set(&c->req.method, method.ptr - buf, method.len);
-	range16_set(&c->req.path, parts.path.ptr - buf, parts.path.len);
-	range16_set(&c->req.querystr, parts.query.ptr - buf, parts.query.len);
 
 	if (c->log_level >= LOG_DBG) {
 		fftime t_end = fftime_monotonic();

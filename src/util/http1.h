@@ -1,17 +1,18 @@
-/** ff: read/write HTTP/1 data
+/** Read/write HTTP/1 data
 2022, Simon Zolin
 */
 
 /*
-ffhttp_req_parse ffhttp_req_write
-ffhttp_resp_parse ffhttp_resp_write
-ffhttp_hdr_parse ffhttp_hdr_write
-ffhttpchunked_parse ffhttpchunked_write
-ffhttpurl_escape ffhttpurl_unescape
-ffhttpurl_split
+http_req_parse http_req_write
+http_resp_parse http_resp_write
+http_hdr_parse http_hdr_write
+httpchunked_parse httpchunked_write
+httpurl_escape httpurl_unescape
+httpurl_split
 */
 
-/* Request:
+/*
+Request:
 	METHOD URL VERSION CRLF
 	[(NAME:VALUE CRLF)...]
 	CRLF
@@ -46,7 +47,7 @@ Example HTTPS request via HTTP proxy:
 #pragma once
 #include <ffbase/string.h>
 
-static int ffhttpurl_escape(char *buf, ffsize cap, ffstr url);
+static int httpurl_escape(char *buf, ffsize cap, ffstr url);
 
 /** Parse HTTP request line, e.g. "GET /file HTTP/1.1\r\n"
 Format:
@@ -55,7 +56,7 @@ Format:
 Return N of bytes processed
  =0 if need more data
  <0 on error */
-static inline int ffhttp_req_parse(ffstr req, ffstr *method, ffstr *path, ffstr *proto)
+static inline int http_req_parse(ffstr req, ffstr *method, ffstr *path, ffstr *proto)
 {
 	const char *d = req.ptr, *end = req.ptr + req.len;
 
@@ -130,7 +131,7 @@ Notes:
 Return N of bytes processed
  =0 if need more data
  <0 on error */
-static inline int ffhttp_resp_parse(ffstr resp, ffstr *proto, ffuint *code, ffstr *msg)
+static inline int http_resp_parse(ffstr resp, ffstr *proto, ffuint *code, ffstr *msg)
 {
 	const char *d = resp.ptr, *end = resp.ptr + resp.len;
 
@@ -171,17 +172,21 @@ static inline int ffhttp_resp_parse(ffstr resp, ffstr *proto, ffuint *code, ffst
 /** Parse HTTP header pair, e.g. "Key: Value\r\n"
 Format:
   (-0-9A-Za-z)+: *(\w)* *\r\n
+name: [output] field name, undefined on last CRLF
+value: [output] field value, undefined on last CRLF
 Return N of bytes processed
  =0 if need more data
  <0 on error */
-static inline int ffhttp_hdr_parse(ffstr data, ffstr *name, ffstr *value)
+static inline int http_hdr_parse(ffstr data, ffstr *name, ffstr *value)
 {
 	const char *d = data.ptr, *end = data.ptr+data.len;
 
 	int r = ffs_skip_ranges(d, end - d, "\x2d\x2d\x30\x39\x41\x5a\x61\x7a", 8); // "-0-9A-Za-z"
 	if (r < 0)
 		return 0;
-	else if (r == 0 || d[r] != ':' || *d == '-')
+	else if (r == 0)
+		goto crlf;
+	else if (d[r] != ':' || *d == '-')
 		return -1;
 	ffstr_set(name, d, r);
 	d += r+1;
@@ -204,6 +209,7 @@ static inline int ffhttp_hdr_parse(ffstr data, ffstr *name, ffstr *value)
 		value->len--;
 	}
 
+crlf:
 	if (*d == '\r') {
 		d++;
 		if (d == end)
@@ -220,7 +226,7 @@ static inline int ffhttp_hdr_parse(ffstr data, ffstr *name, ffstr *value)
 /** Write HTTP request line, e.g. "GET /path HTTP/1.1\r\n"
 Return N of bytes written
  <0 if not enough space */
-static inline int ffhttp_req_write(char *buf, ffsize cap, ffstr method, ffstr path, ffuint flags)
+static inline int http_req_write(char *buf, ffsize cap, ffstr method, ffstr path, ffuint flags)
 {
 	ffuint n = method.len + path.len + 8+4;
 	if (n > cap)
@@ -232,7 +238,7 @@ static inline int ffhttp_req_write(char *buf, ffsize cap, ffstr method, ffstr pa
 	if (flags == 0) {
 		p = ffmem_copy(p, path.ptr, path.len);
 	} else {
-		ffssize r = ffhttpurl_escape(p, buf+cap - p - (1+8+2), path);
+		ffssize r = httpurl_escape(p, buf+cap - p - (1+8+2), path);
 		if (r < 0)
 			return -1;
 		p += r;
@@ -245,7 +251,7 @@ static inline int ffhttp_req_write(char *buf, ffsize cap, ffstr method, ffstr pa
 /** Write HTTP response line, e.g. "HTTP/1.1 200 OK\r\n"
 Return N of bytes written
  <0 if not enough space */
-static inline int ffhttp_resp_write(char *buf, ffsize cap, ffuint code, ffstr msg)
+static inline int http_resp_write(char *buf, ffsize cap, ffuint code, ffstr msg)
 {
 	ffuint n = 8+3 + msg.len + 4;
 	if (n > cap)
@@ -269,7 +275,7 @@ static inline int ffhttp_resp_write(char *buf, ffsize cap, ffuint code, ffstr ms
 /** Write HTTP header line, e.g. "Key: Value\r\n"
 Return N of bytes written
  0 if not enough space */
-static inline int ffhttp_hdr_write(char *buf, ffsize cap, ffstr name, ffstr val)
+static inline int http_hdr_write(char *buf, ffsize cap, ffstr name, ffstr val)
 {
 	ffuint n = name.len + val.len + 4;
 	if (n > cap)
@@ -286,7 +292,7 @@ static inline int ffhttp_hdr_write(char *buf, ffsize cap, ffstr name, ffstr val)
 }
 
 
-struct ffhttpchunked {
+struct httpchunked {
 	ffuint state;
 	ffuint last_chunk;
 	ffuint64 size;
@@ -296,7 +302,7 @@ struct ffhttpchunked {
 Return N of bytes processed, `output` contains unchunked data (if any)
  -1 if done
  <0 on error */
-static inline ffssize ffhttpchunked_parse(struct ffhttpchunked *c, ffstr input, ffstr *output)
+static inline ffssize httpchunked_parse(struct httpchunked *c, ffstr input, ffstr *output)
 {
 	char *d = input.ptr;
 	ffsize i, len = input.len;
@@ -381,7 +387,7 @@ end:
 
 /** Prepare chunked data
 buf: buffer of at least 18 bytes for header and trailer */
-static inline void ffhttpchunked_write(char *buf, ffsize data_len, ffstr *hdr, ffstr *trl)
+static inline void httpchunked_write(char *buf, ffsize data_len, ffstr *hdr, ffstr *trl)
 {
 	char *p = buf;
 	p += ffs_fromint(data_len, p, 18, FFS_INTHEX);
@@ -395,7 +401,7 @@ static inline void ffhttpchunked_write(char *buf, ffsize data_len, ffstr *hdr, f
 /** Escape URL string with "%XX"
 Return N of bytes written
  <0 if not enough space */
-static inline int ffhttpurl_escape(char *buf, ffsize cap, ffstr url)
+static inline int httpurl_escape(char *buf, ffsize cap, ffstr url)
 {
 	char *d = url.ptr, *end = url.ptr + url.len, *p = buf, *ebuf = buf + cap;
 
@@ -425,7 +431,7 @@ static inline int ffhttpurl_escape(char *buf, ffsize cap, ffstr url)
 /** Replace each "%XX" escape sequence in URL string with a byte value
 Return N of bytes written
  <0 if not enough space */
-static inline int ffhttpurl_unescape(char *buf, ffsize cap, ffstr url)
+static inline int httpurl_unescape(char *buf, ffsize cap, ffstr url)
 {
 	char *d = url.ptr, *end = url.ptr + url.len, *p = buf, *ebuf = buf + cap;
 
@@ -472,14 +478,14 @@ static inline int ffhttpurl_unescape(char *buf, ffsize cap, ffstr url)
 }
 
 
-struct ffhttpurl_parts {
+struct httpurl_parts {
 	ffstr scheme, host, port, path, query, hash;
 };
 
 /** Split URL into parts and don't validate input at all.
 [http://] host|ip4|\[ip6\] [:80] [/path [?query] [#hash]]
 Return 0 */
-static inline int ffhttpurl_split(struct ffhttpurl_parts *parts, ffstr url)
+static inline int httpurl_split(struct httpurl_parts *parts, ffstr url)
 {
 	const char *u = url.ptr, *end = url.ptr + url.len, *p;
 	ffssize r;

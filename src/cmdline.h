@@ -65,6 +65,9 @@ static int cmd_help()
 "-w, --www DIR       Web directory (def: www)\n"
 "-t, --threads N     Worker threads (def: CPU#)\n"
 "-c, --cpumask N     CPU affinity bitmask, hex value (e.g. 15 for CPUs 0,2,4)\n"
+"-T, --kcall-threads N\n"
+"                    kcall worker threads (def: CPU#)\n"
+"-p, --polling       Active polling mode\n"
 "-D, --debug         Debug log level\n"
 "-h, --help          Show help\n"
 ;
@@ -76,7 +79,9 @@ static const ffcmdarg_arg ahd_cmd_args[] = {
 	{ 'l', "listen",	FFCMDARG_TSTR | FFCMDARG_FNOTEMPTY, (ffsize)cmd_listen },
 	{ 'w', "www",	FFCMDARG_TSTR | FFCMDARG_FNOTEMPTY, FF_OFF(struct ahd_conf, www) },
 	{ 't', "threads",	FFCMDARG_TINT32, FF_OFF(struct ahd_conf, workers_n) },
+	{ 'T', "kcall-threads",	FFCMDARG_TINT32, FF_OFF(struct ahd_conf, kcall_workers) },
 	{ 'c', "cpumask",	FFCMDARG_TSTR, (ffsize)cmd_cpumask },
+	{ 'p', "polling",	FFCMDARG_TSWITCH, FF_OFF(struct ahd_conf, polling_mode) },
 	{ 'D', "debug",	FFCMDARG_TSWITCH, (ffsize)cmd_debug },
 	{ 'h', "help",	FFCMDARG_TSWITCH, (ffsize)cmd_help },
 	{}
@@ -95,7 +100,7 @@ void conf_init(struct ahd_conf *conf)
 	conf->read_buf_size = 4096;
 	conf->write_buf_size = 4096;
 	conf->file_buf_size = 16*1024;
-	conf->events_num = 512;
+	conf->events_num = 1024;
 	conf->tcp_nodelay = 1;
 	conf->timer_interval_msec = 250;
 	conf->max_keep_alive_reqs = 100;
@@ -123,6 +128,8 @@ int cmd_fin(struct ahd_conf *conf)
 		if (conf->cpumask == 0)
 			conf->cpumask = (uint)-1;
 	}
+	if (conf->kcall_workers == 0)
+		conf->kcall_workers = conf->workers_n;
 	return 0;
 }
 
