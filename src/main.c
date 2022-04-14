@@ -138,7 +138,7 @@ int main(int argc, char **argv)
 	boss = ffmem_new(struct ahd_boss);
 	boss->conn_id = 1;
 
-	ffsock_init(FFSOCK_INIT_SIGPIPE);
+	ffsock_init(FFSOCK_INIT_SIGPIPE | FFSOCK_INIT_WSA | FFSOCK_INIT_WSAFUNCS);
 	http_mods_init();
 	if (0 != kcq_init())
 		goto end;

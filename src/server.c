@@ -11,6 +11,7 @@
 
 struct server {
 	struct ahd_kev kev;
+	ffkq_task accept_task;
 	struct ahd_boss *boss;
 	ffthread thd;
 	ffuint64 thd_id;
@@ -26,6 +27,7 @@ struct server {
 	ffkq_postevent kqpost;
 	uint worker_stop;
 	uint log_level;
+	uint sock_family;
 
 	struct ffkcallqueue kcq;
 	struct ahd_kev kcq_kev;
@@ -73,6 +75,7 @@ struct server* sv_new(struct ahd_boss *boss)
 	s->thd = FFTHREAD_NULL;
 	s->kq = FFKQ_NULL;
 	s->lsock = FFSOCK_NULL;
+	s->timer = FFTIMER_NULL;
 	s->log_level = ahd_conf->log_level;
 	s->boss = boss;
 	return s;
@@ -122,8 +125,8 @@ void sv_cpu_affinity(struct server *s, uint icpu)
 static int lsock_prepare(struct server *s)
 {
 	const void *ip4 = ffip6_tov4((void*)ahd_conf->bind_ip);
-	int fam = (ip4 != NULL) ? AF_INET : AF_INET6;
-	if (FFSOCK_NULL == (s->lsock = ffsock_create_tcp(fam, FFSOCK_NONBLOCK))) {
+	s->sock_family = (ip4 != NULL) ? AF_INET : AF_INET6;
+	if (FFSOCK_NULL == (s->lsock = ffsock_create_tcp(s->sock_family, FFSOCK_NONBLOCK))) {
 		sv_sysfatallog(s, "ffsock_create_tcp");
 		return -1;
 	}
@@ -223,6 +226,7 @@ int FFTHREAD_PROCCALL sv_run(struct server *s)
 		return -1;
 
 	sv_verblog(s, "listening on %u", ahd_conf->listen_port);
+	sv_accept(s);
 	sv_worker(s);
 	return 0;
 }
@@ -248,8 +252,8 @@ static int sv_accept1(struct server *s)
 
 	ffsock csock;
 	ffsockaddr peer;
-	if (FFSOCK_NULL == (csock = ffsock_accept(s->lsock, &peer, FFSOCK_NONBLOCK))) {
-		if (fferr_again(fferr_last()))
+	if (FFSOCK_NULL == (csock = ffsock_accept_async(s->lsock, &peer, FFSOCK_NONBLOCK, s->sock_family, NULL, &s->accept_task))) {
+		if (fferr_last() == FFSOCK_EINPROGRESS)
 			return -1;
 
 		if (fferr_fdlimit(fferr_last())) {
