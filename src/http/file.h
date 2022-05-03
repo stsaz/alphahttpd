@@ -39,6 +39,7 @@ static void file_close(struct client *c)
 {
 	if (c->file.f != FFFILE_NULL) {
 		fffile_close(c->file.f);
+		c->file.f = FFFILE_NULL;
 	}
 	ffvec_free(&c->file.buf);
 }

@@ -73,6 +73,10 @@ struct client {
 	} req;
 
 	struct {
+		ffvec buf;
+	} index;
+
+	struct {
 		fffd f;
 		ffvec buf;
 		fffileinfo info;
