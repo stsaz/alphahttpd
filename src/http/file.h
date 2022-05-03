@@ -85,16 +85,7 @@ static int mtime(struct client *c, const fffileinfo *fi)
 }
 
 static ffmap content_types_map;
-static const char content_types_data[] = "\
-image/gif	gif\n\
-image/jpeg	jpg\n\
-image/png	png\n\
-image/svg+xml	svg\n\
-image/webp	webp\n\
-text/css	css\n\
-text/html	htm html\n\
-text/plain	txt\n\
-";
+static char *content_types_data;
 
 static int ctmap_keyeq(void *opaque, const void *key, ffsize keylen, void *val)
 {
@@ -105,9 +96,16 @@ static int ctmap_keyeq(void *opaque, const void *key, ffsize keylen, void *val)
 
 void content_types_init()
 {
+	ffvec v = {};
+	char *fn = conf_abs_filename("content-types.conf");
+	if (0 != fffile_readwhole(fn, &v, 64*1024)) {
+		goto end;
+	}
+	content_types_data = v.ptr;
+
 	ffmap_init(&content_types_map, ctmap_keyeq);
 	ffmap_alloc(&content_types_map, 9);
-	ffstr in = FFSTR_INITZ(content_types_data), out, ct = {};
+	ffstr in = FFSTR_INITSTR(&v), out, ct = {};
 	struct ltconf conf = {};
 
 	for (;;) {
@@ -119,7 +117,7 @@ void content_types_init()
 			break;
 		case LTCONF_VAL: {
 			if (out.len > 4)
-				return;
+				goto end;
 			range16 k, v;
 			range16_set(&k, out.ptr - content_types_data, out.len);
 			range16_set(&v, ct.ptr - content_types_data, ct.len);
@@ -131,9 +129,12 @@ void content_types_init()
 		case LTCONF_MORE:
 		case LTCONF_ERROR:
 		default:
-			return;
+			goto end;
 		}
 	}
+
+end:
+	ffmem_free(fn);
 }
 
 static void content_type(struct client *c)

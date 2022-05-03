@@ -6,7 +6,9 @@
 #include <cmdline.h>
 #include <FFOS/signal.h>
 #include <FFOS/ffos-extern.h>
+#ifdef FF_UNIX
 #include <sys/resource.h>
+#endif
 
 int _ffcpu_features;
 struct ahd_conf *ahd_conf;
@@ -120,7 +122,7 @@ static void onsig(struct ffsig_info *i)
 
 int main(int argc, char **argv)
 {
-	static char appname[] = "αhttpd " AHD_VER "\n";
+	static const char appname[] = "αhttpd v" AHD_VER "\n";
 	ffstdout_write(appname, FFS_LEN(appname));
 
 	ahd_conf = ffmem_new(struct ahd_conf);
@@ -128,17 +130,20 @@ int main(int argc, char **argv)
 	if (0 != cmd_read(ahd_conf, argc, (const char**)argv))
 		goto end;
 
+#ifdef FF_UNIX
 	if (ahd_conf->fd_limit != 0) {
 		struct rlimit rl;
 		rl.rlim_cur = ahd_conf->fd_limit;
 		rl.rlim_max = ahd_conf->fd_limit;
 		setrlimit(RLIMIT_NOFILE, &rl);
 	}
+#endif
 
 	boss = ffmem_new(struct ahd_boss);
 	boss->conn_id = 1;
 
-	ffsock_init(FFSOCK_INIT_SIGPIPE | FFSOCK_INIT_WSA | FFSOCK_INIT_WSAFUNCS);
+	if (0 != ffsock_init(FFSOCK_INIT_SIGPIPE | FFSOCK_INIT_WSA | FFSOCK_INIT_WSAFUNCS))
+		goto end;
 	http_mods_init();
 	if (0 != kcq_init())
 		goto end;
@@ -158,7 +163,7 @@ int main(int argc, char **argv)
 
 	cpu_affinity();
 
-	static const uint sigs[] = { SIGINT };
+	static const uint sigs[] = { FFSIG_INT };
 	ffsig_subscribe(onsig, sigs, FF_COUNT(sigs));
 
 	struct server *s = *(struct server**)boss->workers.ptr;

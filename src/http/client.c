@@ -115,7 +115,7 @@ struct client {
 
 static void cl_init(struct client *c);
 static void cl_chain_process(struct client *c);
-static void cl_kq_attach(struct client *c);
+static int cl_kq_attach(struct client *c);
 static void cl_destroy(struct client *c);
 static void cl_resp_status(struct client *c, enum HTTP_STATUS status);
 static void cl_resp_status_ok(struct client *c, enum HTTP_STATUS status);
@@ -183,6 +183,11 @@ void cl_start(struct ahd_kev *kev, ffsock csock, const ffsockaddr *peer, struct 
 		cl_verblog(c, "new client connection: %*s:%u"
 			, (ffsize)r, buf, c->peer_port);
 	}
+
+#ifdef FF_WIN
+	if (0 != cl_kq_attach(c))
+		return;
+#endif
 
 	cl_init(c);
 	cl_chain_process(c);
@@ -307,11 +312,14 @@ end:
 	cl_destroy(c);
 }
 
-static void cl_kq_attach(struct client *c)
+static int cl_kq_attach(struct client *c)
 {
 	c->kq_attached = 1;
-	if (0 != sv_kq_attach(c->srv, c->sk, c->kev, (void*)c))
+	if (0 != sv_kq_attach(c->srv, c->sk, c->kev, (void*)c)) {
 		cl_destroy(c);
+		return -1;
+	}
+	return 0;
 }
 
 static void cl_resp_status(struct client *c, enum HTTP_STATUS status)

@@ -11,7 +11,10 @@
 #include <FFOS/timerqueue.h>
 #include <ffbase/vector.h>
 
-#define AHD_VER "v0.3"
+#define AHD_VER "0.4"
+
+typedef unsigned int uint;
+typedef unsigned short ushort;
 
 struct ahd_boss {
 	ffvec workers; // struct server*[]
@@ -26,6 +29,7 @@ struct ahd_boss {
 typedef fftimerqueue_node ahd_timer;
 
 struct ahd_conf {
+	ffstr root_dir;
 	char bind_ip[16];
 	ffushort listen_port;
 	ffbyte tcp_nodelay;
@@ -46,6 +50,9 @@ struct ahd_conf {
 	ffstr www;
 };
 extern struct ahd_conf *ahd_conf;
+
+/** Convert relative file name to absolute file name using application directory */
+char* conf_abs_filename(const char *rel_fn);
 
 struct server;
 struct server* sv_new(struct ahd_boss *boss);
@@ -72,6 +79,11 @@ int sv_kq_attach(struct server *s, ffsock sk, struct ahd_kev *kev, void *obj);
 typedef void (*ahd_kev_func)(void *obj);
 struct ahd_kev {
 	ahd_kev_func rhandler, whandler;
+	union {
+		ffkq_task rtask;
+		ffkq_task_accept rtask_accept;
+	};
+	ffkq_task wtask;
 	uint side;
 	void *obj;
 	struct ahd_kev *next_kev;

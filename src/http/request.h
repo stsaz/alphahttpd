@@ -45,17 +45,16 @@ static int req_read(struct client *c)
 	}
 
 	for (;;) {
-		int r = ffsock_recv(c->sk, c->req.buf.ptr + c->req.buf.len, c->req.buf.cap - c->req.buf.len, 0);
+		int r = ffsock_recv_async(c->sk, c->req.buf.ptr + c->req.buf.len, c->req.buf.cap - c->req.buf.len, &c->kev->rtask);
 		if (r < 0) {
-			if (fferr_again(fferr_last())) {
+			if (fferr_last() == FFSOCK_EINPROGRESS) {
 				c->kev->rhandler = (ahd_kev_func)(void*)req_read;
 				if (!c->kq_attached)
 					cl_kq_attach(c);
 				sv_timer(c->srv, &c->req.timer, ahd_conf->read_timeout_sec*1000, (fftimerqueue_func)req_read_expired, c);
 				return CHAIN_ASYNC;
 			}
-			if (!(c->req.buf.len == 0 && fferr_last() == ECONNRESET))
-				cl_syswarnlog(c, "ffsock_recv");
+			cl_dbglog(c, "ffsock_recv: %E", fferr_last());
 			return CHAIN_ERR;
 		}
 

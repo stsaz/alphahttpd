@@ -4,7 +4,7 @@
 
 Current features and limitations:
 
-* Runs on Linux and FreeBSD (uses epoll and kqueue)
+* Runs on Linux, FreeBSD, Windows (uses epoll, kqueue, IOCP)
 * Multi-threaded, uses all CPUs by default
 * Completely asynchronous file I/O (offload syscalls to other threads)
 * Can work in active polling mode, improving overall performance
@@ -33,12 +33,17 @@ Build on Linux:
 	cd alphahttpd
 	make -j4
 
+Build on Linux for Windows:
+
+	mingw64-make -j4 OS=windows
+
 Build on FreeBSD:
 
 	gmake -j4
 
 Run:
 
+	cd alphahttpd-0
 	./alphahttpd
 
 Use custom address and port:
@@ -75,3 +80,8 @@ Notes:
 * nginx writes access log to a real file
 * nginx has fd cache
 * nginx sends 3 more response header fields (Date, ETag, Accept-Ranges)
+
+
+## Homepage
+
+https://github.com/stsaz/alphahttpd

@@ -11,7 +11,6 @@
 
 struct server {
 	struct ahd_kev kev;
-	ffkq_task accept_task;
 	struct ahd_boss *boss;
 	ffthread thd;
 	ffuint64 thd_id;
@@ -105,12 +104,13 @@ void sv_stop(struct server *s)
 
 #ifdef FF_LINUX
 typedef cpu_set_t _cpuset;
-#else
+#elif defined FF_BSD
 typedef cpuset_t _cpuset;
 #endif
 
 void sv_cpu_affinity(struct server *s, uint icpu)
 {
+#ifdef FF_UNIX
 	_cpuset cpuset;
 	CPU_ZERO(&cpuset);
 	CPU_SET(icpu, &cpuset);
@@ -120,6 +120,7 @@ void sv_cpu_affinity(struct server *s, uint icpu)
 		return;
 	}
 	sv_dbglog(s, "CPU affinity: %u", icpu);
+#endif
 }
 
 static int lsock_prepare(struct server *s)
@@ -145,12 +146,14 @@ static int lsock_prepare(struct server *s)
 		}
 	}
 
+#ifdef FF_UNIX
 	// Allow several listening sockets to bind to the same address/port.
 	// OS automatically distributes the load among the sockets.
 	if (0 != ffsock_setopt(s->lsock, SOL_SOCKET, SO_REUSEPORT, 1)) {
 		sv_sysfatallog(s, "ffsock_setopt(SO_REUSEPORT)");
 		return -1;
 	}
+#endif
 
 	if (0 != ffsock_bind(s->lsock, &addr)) {
 		sv_sysfatallog(s, "socket bind");
@@ -252,7 +255,7 @@ static int sv_accept1(struct server *s)
 
 	ffsock csock;
 	ffsockaddr peer;
-	if (FFSOCK_NULL == (csock = ffsock_accept_async(s->lsock, &peer, FFSOCK_NONBLOCK, s->sock_family, NULL, &s->accept_task))) {
+	if (FFSOCK_NULL == (csock = ffsock_accept_async(s->lsock, &peer, FFSOCK_NONBLOCK, s->sock_family, NULL, &s->kev.rtask_accept))) {
 		if (fferr_last() == FFSOCK_EINPROGRESS)
 			return -1;
 
@@ -312,6 +315,15 @@ static int sv_worker(struct server *s)
 				continue;
 
 			int flags = ffkq_event_flags(ev);
+			// ffkq_task_event_assign();
+
+#ifdef FF_WIN
+			if (ev->lpOverlapped == &c->rtask.overlapped)
+				flags = FFKQ_READ;
+			else if (ev->lpOverlapped == &c->wtask.overlapped)
+				flags = FFKQ_WRITE;
+#endif
+
 			if ((flags & FFKQ_READ) && c->rhandler != NULL)
 				c->rhandler(c->obj);
 			if ((flags & FFKQ_WRITE) && c->whandler != NULL)

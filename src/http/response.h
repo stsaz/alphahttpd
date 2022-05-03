@@ -114,9 +114,9 @@ static int resp_send(struct client *c)
 	}
 
 	while (c->send.iov_n != 0) {
-		int r = ffsock_sendv(c->sk, c->send.iov, c->send.iov_n);
+		int r = ffsock_sendv_async(c->sk, c->send.iov, c->send.iov_n, &c->kev->wtask);
 		if (r < 0) {
-			if (fferr_again(fferr_last())) {
+			if (fferr_last() == FFSOCK_EINPROGRESS) {
 				c->kev->whandler = (ahd_kev_func)(void*)resp_send;
 				if (!c->kq_attached)
 					cl_kq_attach(c);

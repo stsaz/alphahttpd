@@ -4,6 +4,8 @@
 #include <util/cmdarg-scheme.h>
 #include <util/ipaddr.h>
 #include <FFOS/sysconf.h>
+#include <FFOS/process.h>
+#include <FFOS/path.h>
 
 #define R_DONE  100
 #define R_BADVAL  101
@@ -90,6 +92,7 @@ static const ffcmdarg_arg ahd_cmd_args[] = {
 void conf_destroy(struct ahd_conf *conf)
 {
 	ffstr_free(&conf->www);
+	ffstr_free(&conf->root_dir);
 }
 
 void conf_init(struct ahd_conf *conf)
@@ -135,6 +138,16 @@ int cmd_fin(struct ahd_conf *conf)
 
 int cmd_read(struct ahd_conf *conf, int argc, const char **argv)
 {
+	char fn[4096];
+	const char *p;
+	if (NULL == (p = ffps_filename(fn, sizeof(fn), argv[0])))
+		return -1;
+	ffstr path;
+	if (0 > ffpath_splitpath(p, ffsz_len(p), &path, NULL))
+		return -1;
+	if (NULL == ffstr_dup(&conf->root_dir, path.ptr, path.len + 1))
+		return -1;
+
 	ffstr errmsg = {};
 	int r = ffcmdarg_parse_object(ahd_cmd_args, conf, argv, argc, 0, &errmsg);
 	if (r < 0) {
@@ -149,4 +162,9 @@ int cmd_read(struct ahd_conf *conf, int argc, const char **argv)
 	if (0 != cmd_fin(conf))
 		return -1;
 	return 0;
+}
+
+char* conf_abs_filename(const char *rel_fn)
+{
+	return ffsz_allocfmt("%S%s", &ahd_conf->root_dir, rel_fn);
 }
