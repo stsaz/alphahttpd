@@ -116,7 +116,8 @@ void content_types_init()
 		case LTCONF_KEY:
 			ct = out;
 			break;
-		case LTCONF_VAL: {
+		case LTCONF_VAL:
+		case LTCONF_VAL_NEXT: {
 			if (out.len > 4)
 				goto end;
 			range16 k, v;

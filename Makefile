@@ -1,8 +1,9 @@
 # alphahttpd Makefile
 
-AHD_DIR := .
-FFBASE_DIR := ../ffbase
-FFOS_DIR := ../ffos
+ROOT_DIR := ..
+AHD_DIR := $(ROOT_DIR)/alphahttpd
+FFBASE_DIR := $(ROOT_DIR)/ffbase
+FFOS_DIR := $(ROOT_DIR)/ffos
 PKG_VER :=
 PKG_ARCH :=
 
@@ -30,8 +31,8 @@ else
 	CFLAGS += -O3 -fno-strict-aliasing
 	LINKFLAGS := -s
 endif
-ifneq "$(SSE42)" "0"
-	CFLAGS += -msse4.2
+ifneq "$(OLD_CPU)" "1"
+	CFLAGS += -march=nehalem
 endif
 ifeq "$(OS)" "windows"
 	LINKFLAGS += -lws2_32
@@ -72,3 +73,6 @@ package: alphahttpd-$(PKG_VER)-$(OS)-$(PKG_ARCH).$(PKG_EXT)
 
 alphahttpd-$(PKG_VER)-$(OS)-$(PKG_ARCH).$(PKG_EXT): $(PKG_DIR)
 	$(PKG_PACKER) $@ $<
+
+test: test.o
+	$(LINK) $+ $(LINKFLAGS) -o $@
