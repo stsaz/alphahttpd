@@ -11,7 +11,7 @@ Current features and limitations:
 * HTTP/1.1 only
 * Serves the file tree in `www/` directory by default
 * Uses `index.html` as index file
-* No directory auto listing
+* Generates index document (directory contents)
 * Doesn't use sendfile()
 * No caching
 * No ETag, If-None-Match, Range

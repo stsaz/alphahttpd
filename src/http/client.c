@@ -41,6 +41,7 @@ struct ahd_mod {
 };
 static const struct ahd_mod req_mod;
 static const struct ahd_mod index_mod;
+static const struct ahd_mod autoindex_mod;
 static const struct ahd_mod file_mod;
 static const struct ahd_mod err_mod;
 static const struct ahd_mod trans_mod;
@@ -49,6 +50,7 @@ static const struct ahd_mod accesslog_mod;
 static const struct ahd_mod* const mods[] = {
 	&req_mod,
 	&index_mod,
+	&autoindex_mod,
 	&file_mod,
 	&err_mod,
 	&trans_mod,
@@ -85,6 +87,11 @@ struct client {
 	struct {
 		ffvec buf;
 	} index;
+
+	struct {
+		ffvec path;
+		ffvec buf;
+	} autoindex;
 
 	struct {
 		fffd f;
@@ -163,6 +170,7 @@ do { \
 
 #include <http/request.h>
 #include <http/index.h>
+#include <http/autoindex.h>
 #include <http/file.h>
 #include <http/error.h>
 #include <http/transfer.h>

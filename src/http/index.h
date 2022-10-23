@@ -31,7 +31,6 @@ int index_process(struct client *c)
 		if (!fferr_notexist(fferr_last())) {
 			cl_syswarnlog(c, "index: fffile_open: %s", fn);
 		}
-		cl_resp_status(c, HTTP_403_FORBIDDEN);
 		return CHAIN_DONE;
 	}
 	cl_dbglog(c, "index: found %s", fn);
