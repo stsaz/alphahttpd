@@ -23,7 +23,7 @@ endif
 CFLAGS := -Wall -Wextra -Wno-unused-parameter -Wno-sign-compare
 CFLAGS += -DFFBASE_HAVE_FFERR_STR
 CFLAGS += -I$(AHD_DIR)/src -I$(FFOS_DIR) -I$(FFBASE_DIR)
-ifeq "$(OPT)" "0"
+ifeq "$(DEBUG)" "1"
 	CFLAGS += -DFF_DEBUG -O0 -g
 # 	CFLAGS += -fsanitize=address
 # 	LINKFLAGS := -fsanitize=address

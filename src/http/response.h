@@ -80,7 +80,10 @@ static int resp_prepare(struct client *c)
 	cl_dbglog(c, "response: %S", &c->resp.buf);
 
 	ffiovec_set(&c->send.iov[0], c->resp.buf.ptr, c->resp.buf.len);
-	ffiovec_set(&c->send.iov[1], c->input.ptr, c->input.len);
+	if (!c->req_method_head)
+		ffiovec_set(&c->send.iov[1], c->input.ptr, c->input.len);
+	else
+		c->resp_done = 1;
 	c->input.len = 0;
 	c->send.iov_n = 2;
 	return 0;

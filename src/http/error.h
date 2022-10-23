@@ -17,8 +17,6 @@ static int err_process(struct client *c)
 	ffstr_setz(&c->resp.content_type, "text/plain");
 	c->resp.content_length = c->resp.msg.len;
 	c->resp_done = 1;
-	if (c->req_method_head)
-		return CHAIN_DONE;
 	ffstr_setstr(&c->output, &c->resp.msg);
 	return CHAIN_DONE;
 }

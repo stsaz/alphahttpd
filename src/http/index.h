@@ -4,7 +4,7 @@
 static int index_open(struct client *c)
 {
 	if (c->resp_err
-		|| c->req.unescaped_path.ptr[c->req.unescaped_path.len-1] != '/')
+		|| *ffstr_last(&c->req.unescaped_path) != '/')
 		return CHAIN_SKIP;
 
 	return CHAIN_FWD;

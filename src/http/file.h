@@ -6,7 +6,7 @@
 
 static int file_open(struct client *c)
 {
-	if (c->resp_err)
+	if (c->resp_err || c->resp.code != 0)
 		return CHAIN_SKIP;
 
 	c->file.f = FFFILE_NULL;

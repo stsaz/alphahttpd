@@ -11,7 +11,7 @@
 #include <FFOS/timerqueue.h>
 #include <ffbase/vector.h>
 
-#define AHD_VER "0.4"
+#define AHD_VER "0.5"
 
 typedef unsigned int uint;
 typedef unsigned short ushort;

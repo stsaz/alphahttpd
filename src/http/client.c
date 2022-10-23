@@ -23,6 +23,16 @@ enum {
 	CHAIN_ERR,
 	CHAIN_FIN,
 };
+static const char codestr[][12] = {
+	"CHAIN_DONE",
+	"CHAIN_FWD",
+	"CHAIN_BACK",
+	"CHAIN_ASYNC",
+	"CHAIN_SKIP",
+	"CHAIN_ERR",
+	"CHAIN_FIN",
+};
+
 struct client;
 struct ahd_mod {
 	int (*open)(struct client *c);
@@ -113,7 +123,7 @@ struct client {
 	struct {
 		uint opened :1;
 		uint done :1;
-	} mdata[8];
+	} mdata[FF_COUNT(mods)];
 	ffstr input, output;
 };
 
@@ -144,6 +154,12 @@ do { \
 	if (c->log_level >= LOG_DBG) \
 		ahd_log(c->srv, LOG_DBG, c->id, __VA_ARGS__); \
 } while (0)
+
+#define cl_fulllog(c, ...)
+#ifdef FF_DEBUG
+	#undef cl_fulllog
+	#define cl_fulllog(c, ...) cl_dbglog(c, __VA_ARGS__)
+#endif
 
 #include <http/request.h>
 #include <http/index.h>
@@ -205,8 +221,10 @@ static void cl_init(struct client *c)
 static void cl_mods_close(struct client *c)
 {
 	for (uint i = 0;  i != FF_COUNT(mods);  i++) {
-		if (c->mdata[i].opened)
+		if (c->mdata[i].opened) {
+			cl_fulllog(c, "closing module %u", i);
 			mods[i]->close(c);
+		}
 	}
 }
 
@@ -250,10 +268,11 @@ static void cl_chain_process(struct client *c)
 {
 	int i = c->imod, r;
 	for (;;) {
-		if (!c->mdata[i].opened) {
-			// cl_dbglog(c, "opening module %u", i);
+		if (!c->mdata[i].opened && !c->mdata[i].done) {
+			cl_fulllog(c, "opening module %u", i);
 			r = mods[i]->open(c);
-			// cl_dbglog(c, "  module %u returned: %u", i, r);
+			(void)codestr;
+			cl_fulllog(c, "  module %u returned: %s", i, codestr[r]);
 			if (r == CHAIN_SKIP || r == CHAIN_ERR) {
 				c->mdata[i].done = 1;
 				c->output = c->input;
@@ -263,11 +282,12 @@ static void cl_chain_process(struct client *c)
 		}
 
 		if (!c->mdata[i].done) {
-			// cl_dbglog(c, "calling module %u input:%L", i, c->input.len);
+			cl_fulllog(c, "calling module %u input:%L", i, c->input.len);
 			r = mods[i]->process(c);
-			// cl_dbglog(c, "  module %u returned: %u  output:%L", i, r, c->output.len);
+			cl_fulllog(c, "  module %u returned: %s  output:%L", i, codestr[r], c->output.len);
 		} else {
 			r = (!c->chain_back) ? CHAIN_FWD : CHAIN_BACK;
+			c->output = c->input;
 		}
 
 		switch (r) {
