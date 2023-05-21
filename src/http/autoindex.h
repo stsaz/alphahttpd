@@ -1,30 +1,31 @@
 /** alphahttpd: show directory contents
 2022, Simon Zolin */
 
+#include <http/client.h>
 #include <FFOS/dirscan.h>
 
-static int autoindex_open(struct client *c)
+static int autoindex_open(alphahttpd_client *c)
 {
 	if (c->resp_err
 		|| *ffstr_last(&c->req.unescaped_path) != '/')
-		return CHAIN_SKIP;
+		return AHFILTER_SKIP;
 
-	return CHAIN_FWD;
+	return AHFILTER_FWD;
 }
 
-void autoindex_close(struct client *c)
+void autoindex_close(alphahttpd_client *c)
 {
 	ffvec_free(&c->autoindex.path);
 	ffvec_free(&c->autoindex.buf);
 }
 
-int autoindex_process(struct client *c)
+int autoindex_process(alphahttpd_client *c)
 {
 	ffdirscan ds = {};
 	ffvec namebuf = {};
 
 	if (0 == ffvec_addfmt(&c->autoindex.path, "%S%S%Z"
-		, &ahd_conf->www, &c->req.unescaped_path)) {
+		, &c->conf->fs.www, &c->req.unescaped_path)) {
 		cl_errlog(c, "no memory");
 		cl_resp_status(c, HTTP_500_INTERNAL_SERVER_ERROR);
 		goto end;
@@ -76,9 +77,9 @@ int autoindex_process(struct client *c)
 end:
 	ffvec_free(&namebuf);
 	ffdirscan_close(&ds);
-	return CHAIN_DONE;
+	return AHFILTER_DONE;
 }
 
-static const struct ahd_mod autoindex_mod = {
+const struct alphahttpd_filter alphahttpd_filter_autoindex = {
 	autoindex_open, autoindex_close, autoindex_process
 };

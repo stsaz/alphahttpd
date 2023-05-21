@@ -2,83 +2,102 @@
 2022, Simon Zolin */
 
 #include <alphahttpd.h>
-#include <log.h>
-#include <cmdline.h>
+#ifdef FF_WIN
+typedef unsigned int uint;
+#endif
+#include <cmd.h>
 #include <FFOS/signal.h>
+#include <FFOS/thread.h>
 #include <FFOS/ffos-extern.h>
 #ifdef FF_UNIX
 #include <sys/resource.h>
 #endif
 
-int _ffcpu_features;
-struct ahd_conf *ahd_conf;
+#define AHD_VER "0.5"
 
+struct worker {
+	alphahttpd *srv;
+	ffthread thd;
+};
+
+struct ahd_boss {
+	ffvec workers; // struct worker[]
+	uint conn_id;
+
+	ffringqueue *kcq_sq;
+	ffsem kcq_sem;
+	ffvec kcq_workers; // ffthread[]
+	uint kcq_stop;
+};
+
+static struct ahd_conf *ahd_conf;
 static struct ahd_boss *boss;
 
-static int FFTHREAD_PROCCALL kcq_worker(void *param);
-static int kcq_init()
+#define sysfatallog(...) \
+	ahd_log(NULL, ALPHAHTTPD_LOG_SYSFATAL, NULL, __VA_ARGS__)
+#define syserrlog(...) \
+	ahd_log(NULL, ALPHAHTTPD_LOG_SYSERR, NULL, __VA_ARGS__)
+#define dbglog(...) \
+do { \
+	if (ahd_conf->aconf.log_level >= ALPHAHTTPD_LOG_DEBUG) \
+		ahd_log(NULL, ALPHAHTTPD_LOG_DEBUG, NULL, __VA_ARGS__); \
+} while (0)
+
+#include <log.h>
+#include <kcq.h>
+
+static int FFTHREAD_PROCCALL wrk_thread(struct worker *w)
 {
-	if (NULL == (boss->kcq_sq = ffrq_alloc(ahd_conf->max_connections))) {
+	dbglog("worker: started");
+	return alphahttpd_run(w->srv);
+}
+
+static int wrk_start(struct worker *w)
+{
+	if (FFTHREAD_NULL == (w->thd = ffthread_create((ffthread_proc)wrk_thread, w, 0))) {
+		syserrlog("thread create");
 		return -1;
-	}
-	if (!ahd_conf->polling_mode
-		&& FFSEM_NULL == (boss->kcq_sem = ffsem_open(NULL, 0, 0))) {
-		return -1;
-	}
-	if (NULL == ffvec_allocT(&boss->kcq_workers, ahd_conf->kcall_workers, ffthread)) {
-		return -1;
-	}
-	boss->kcq_workers.len = ahd_conf->kcall_workers;
-	ffthread *it;
-	FFSLICE_WALK(&boss->kcq_workers, it) {
-		if (FFTHREAD_NULL == (*it = ffthread_create(kcq_worker, boss, 0))) {
-			return -1;
-		}
 	}
 	return 0;
 }
 
-static void kcq_destroy()
+#ifdef FF_LINUX
+typedef cpu_set_t _cpuset;
+#elif defined FF_BSD
+typedef cpuset_t _cpuset;
+#endif
+
+static void wrk_cpu_affinity(struct worker *w, uint icpu)
 {
-	// sv_dbglog(s, "stopping kcall worker");
-	FFINT_WRITEONCE(boss->kcq_stop, 1);
-	ffcpu_fence_release();
-	ffthread *it;
-	if (boss->kcq_sem != FFSEM_NULL) {
-		FFSLICE_WALK(&boss->kcq_workers, it) {
-			ffsem_post(boss->kcq_sem);
-		}
+#ifdef FF_UNIX
+	_cpuset cpuset;
+	CPU_ZERO(&cpuset);
+	CPU_SET(icpu, &cpuset);
+	ffthread t = (w->thd != FFTHREAD_NULL) ? w->thd : pthread_self();
+	if (0 != pthread_setaffinity_np(t, sizeof(cpuset), &cpuset)) {
+		syserrlog("set CPU affinity");
+		return;
 	}
-	FFSLICE_WALK(&boss->kcq_workers, it) {
-		if (*it != FFTHREAD_NULL)
-			ffthread_join(*it, -1, NULL);
-	}
-	if (boss->kcq_sem != FFSEM_NULL)
-		ffsem_close(boss->kcq_sem);
-	ffrq_free(boss->kcq_sq);
-	ffvec_free(&boss->kcq_workers);
+	dbglog("worker %p: CPU affinity: %u", w, icpu);
+#endif
 }
 
-static int FFTHREAD_PROCCALL kcq_worker(void *param)
-{
-	// sv_dbglog(s, "entering kcall loop");
-	uint polling_mode = ahd_conf->polling_mode;
-	while (!FFINT_READONCE(boss->kcq_stop)) {
-		ffkcallq_process_sq(boss->kcq_sq);
-		if (!polling_mode)
-			ffsem_wait(boss->kcq_sem, -1);
-	}
-	// sv_dbglog(s, "leaving kcall loop");
-	return 0;
-}
-
+/** Send stop signal to all workers */
 static void boss_stop()
 {
-	struct server **it;
-	FFSLICE_WALK(&boss->workers, it) {
-		struct server *s = *it;
-		sv_stop(s);
+	struct worker *w;
+	FFSLICE_WALK(&boss->workers, w) {
+		alphahttpd_stop(w->srv);
 	}
+}
+
+static void wrk_destroy(struct worker *w)
+{
+	alphahttpd_stop(w->srv);
+	if (w->thd != FFTHREAD_NULL) {
+		ffthread_join(w->thd, -1, NULL);
+	}
+	alphahttpd_free(w->srv);
 }
 
 static void boss_destroy()
@@ -86,11 +105,9 @@ static void boss_destroy()
 	if (boss == NULL)
 		return;
 
-	struct server **it;
-	FFSLICE_WALK(&boss->workers, it) {
-		struct server *s = *it;
-		sv_stop(s);
-		sv_free(s);
+	struct worker *w;
+	FFSLICE_WALK(&boss->workers, w) {
+		wrk_destroy(w);
 	}
 	ffvec_free(&boss->workers);
 
@@ -103,21 +120,46 @@ static void cpu_affinity()
 		return;
 
 	uint mask = ahd_conf->cpumask;
-	struct server **it;
-	FFSLICE_WALK(&boss->workers, it) {
-		struct server *s = *it;
+	struct worker *w;
+	FFSLICE_WALK(&boss->workers, w) {
 		uint n = ffbit_rfind32(mask);
 		if (n == 0)
 			break;
 		n--;
 		ffbit_reset32(&mask, n);
-		sv_cpu_affinity(s, n);
+		wrk_cpu_affinity(w, n);
 	}
 }
 
 static void onsig(struct ffsig_info *i)
 {
 	boss_stop();
+}
+
+extern const struct alphahttpd_filter* ah_filters[];
+
+/** Initialize HTTP modules */
+static void http_mods_init(struct alphahttpd_conf *aconf)
+{
+	ffvec v = {};
+	char *fn = conf_abs_filename(ahd_conf, "content-types.conf");
+	if (0 == fffile_readwhole(fn, &v, 64*1024)) {
+		alphahttpd_filter_file_init(aconf, *(ffstr*)&v);
+		ffvec_null(&v);
+	}
+	ffvec_free(&v);
+	ffmem_free(fn);
+}
+
+static void aconf_setup(struct ahd_conf *conf)
+{
+	struct alphahttpd_conf *ac = &conf->aconf;
+	ac->log = ahd_log;
+	ac->logv = ahd_logv;
+	ac->kcq_set = kcq_set;
+	ac->filters = (const struct alphahttpd_filter**)ah_filters;
+	ac->server.conn_id_counter = &boss->conn_id;
+	http_mods_init(ac);
 }
 
 int main(int argc, char **argv)
@@ -144,20 +186,28 @@ int main(int argc, char **argv)
 
 	if (0 != ffsock_init(FFSOCK_INIT_SIGPIPE | FFSOCK_INIT_WSA | FFSOCK_INIT_WSAFUNCS))
 		goto end;
-	http_mods_init();
 	if (0 != kcq_init())
 		goto end;
 
-	ffvec_allocT(&boss->workers, ahd_conf->workers_n, void*);
+	aconf_setup(ahd_conf);
+
+	ffvec_allocT(&boss->workers, ahd_conf->workers_n, struct worker);
 	boss->workers.len = ahd_conf->workers_n;
-	struct server **it;
-	FFSLICE_WALK(&boss->workers, it) {
-		struct server *s = sv_new(boss);
-		*it = s;
-		if (it != boss->workers.ptr) {
-			if (0 != sv_start(s)) {
+	struct worker *w;
+	FFSLICE_WALK(&boss->workers, w) {
+		w->srv = alphahttpd_new();
+		if (w == boss->workers.ptr)
+			ahd_conf->aconf.opaque = w->srv;
+		alphahttpd_conf(w->srv, &ahd_conf->aconf);
+	}
+
+	if (0 != kcq_start())
+		goto end;
+
+	FFSLICE_WALK(&boss->workers, w) {
+		if (w != boss->workers.ptr) {
+			if (0 != wrk_start(w))
 				goto end;
-			}
 		}
 	}
 
@@ -166,8 +216,8 @@ int main(int argc, char **argv)
 	static const uint sigs[] = { FFSIG_INT };
 	ffsig_subscribe(onsig, sigs, FF_COUNT(sigs));
 
-	struct server *s = *(struct server**)boss->workers.ptr;
-	if (0 != sv_run(s))
+	w = boss->workers.ptr;
+	if (0 != alphahttpd_run(w->srv))
 		goto end;
 
 end:

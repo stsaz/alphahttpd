@@ -1,114 +1,116 @@
-/** alphahttpd: shared types and functions
-2022, Simon Zolin */
+/** alphahttpd: server interface
+2023, Simon Zolin */
 
 #pragma once
-#include <FFOS/error.h>
 #include <FFOS/kcall.h>
 #include <FFOS/socket.h>
-#include <FFOS/string.h>
-#include <FFOS/thread.h>
-#include <FFOS/time.h>
-#include <FFOS/timerqueue.h>
-#include <ffbase/vector.h>
+#include <ffbase/map.h>
 
-#define AHD_VER "0.5"
+typedef struct alphahttpd alphahttpd;
+typedef struct alphahttpd_client alphahttpd_client;
+struct alphahttpd_filter;
 
-typedef unsigned int uint;
-typedef unsigned short ushort;
-
-struct ahd_boss {
-	ffvec workers; // struct server*[]
-	uint conn_id;
-
-	ffringqueue *kcq_sq;
-	ffsem kcq_sem;
-	ffvec kcq_workers; // ffthread[]
-	uint kcq_stop;
+enum ALPHAHTTPD_LOG {
+	ALPHAHTTPD_LOG_SYSFATAL,
+	ALPHAHTTPD_LOG_SYSERR,
+	ALPHAHTTPD_LOG_ERR,
+	ALPHAHTTPD_LOG_SYSWARN,
+	ALPHAHTTPD_LOG_WARN,
+	ALPHAHTTPD_LOG_INFO,
+	ALPHAHTTPD_LOG_VERBOSE,
+	ALPHAHTTPD_LOG_DEBUG,
+	ALPHAHTTPD_LOG_EXTRA,
 };
 
-typedef fftimerqueue_node ahd_timer;
-
-struct ahd_conf {
-	ffstr root_dir;
-	char bind_ip[16];
-	ffushort listen_port;
-	ffbyte tcp_nodelay;
-	uint log_level;
-	uint max_connections;
-	uint fd_limit;
-	uint events_num;
-	uint timer_interval_msec;
-	uint workers_n;
-	uint cpumask;
-	uint kcall_workers;
-	ffbyte polling_mode;
-
-	uint read_buf_size, write_buf_size, file_buf_size;
-	uint read_timeout_sec, write_timeout_sec, fdlimit_timeout_sec;
-	uint max_keep_alive_reqs;
-	ffstr index_filename;
-	ffstr www;
-};
-extern struct ahd_conf *ahd_conf;
-
-/** Convert relative file name to absolute file name using application directory */
-char* conf_abs_filename(const char *rel_fn);
-
-struct server;
-struct server* sv_new(struct ahd_boss *boss);
-void sv_free(struct server *s);
-void sv_stop(struct server *s);
-void sv_cpu_affinity(struct server *s, uint mask);
-int sv_start(struct server *s);
-int sv_run(struct server *s);
-
-/** Get cached calendar UTC date */
-fftime sv_date(struct server *s, ffstr *dts);
-
-/** Get thread ID */
-ffuint64 sv_tid(struct server *s);
-
-/** Add/restart/remove periodic/one-shot timer */
-void sv_timer(struct server *s, ahd_timer *tmr, int interval_msec, fftimerqueue_func func, void *param);
-#define sv_timer_stop(s, tmr) \
-	sv_timer(s, tmr, 0, NULL, NULL)
-
-struct ahd_kev;
-void sv_conn_fin(struct server *s, struct ahd_kev *kev);
-int sv_kq_attach(struct server *s, ffsock sk, struct ahd_kev *kev, void *obj);
-typedef void (*ahd_kev_func)(void *obj);
-struct ahd_kev {
-	ahd_kev_func rhandler, whandler;
-	union {
-		ffkq_task rtask;
-		ffkq_task_accept rtask_accept;
-	};
-	ffkq_task wtask;
-	uint side;
-	void *obj;
-	struct ahd_kev *next_kev;
-	struct ffkcall kcall;
+struct alphahttpd_address {
+	ffbyte ip[16];
+	ffuint port;
 };
 
+struct alphahttpd_conf {
+	void *opaque;
+	ffuint log_level;
+	void (*log)(void *opaque, ffuint level, const char *id, const char *format, ...);
+	void (*logv)(void *opaque, ffuint level, const char *id, const char *format, va_list va);
 
-enum LOG {
-	LOG_SYSFATAL,
-	LOG_SYSERR,
-	LOG_ERR,
-	LOG_SYSWARN,
-	LOG_WARN,
-	LOG_INFO,
-	LOG_VERB,
-	LOG_DBG,
+	/** Set kcq->sq and kcq->sem.
+	If NULL, KCQ mechanism will be disabled. */
+	void (*kcq_set)(void *opaque, struct ffkcallqueue *kcq);
+
+	struct {
+		const struct alphahttpd_address *listen_addresses;
+		ffuint max_connections;
+		ffuint events_num;
+		ffuint fdlimit_timeout_sec;
+		ffuint timer_interval_msec;
+		ffuint _conn_id_counter_default;
+		ffuint *conn_id_counter;
+		ffbyte polling_mode;
+	} server;
+
+	const struct alphahttpd_filter **filters;
+
+	ffuint max_keep_alive_reqs;
+
+	struct {
+		ffuint buf_size;
+		ffuint timeout_sec;
+	} receive;
+
+	struct {
+		ffstr www;
+		ffstr index_filename;
+		ffuint file_buf_size;
+
+		ffmap content_types_map;
+		char *content_types_data;
+	} fs;
+
+	struct {
+		ffuint buf_size;
+		ffstr server_name;
+	} response;
+
+	struct {
+		ffbyte tcp_nodelay;
+		ffuint timeout_sec;
+	} send;
+
+	struct {
+		ffmap map;
+	} virtspace;
 };
 
-/** Add line to log
-level: enum LOG */
-void ahd_log(struct server *s, uint level, const char *id, const char *fmt, ...);
+FF_EXTERN alphahttpd* alphahttpd_new();
+FF_EXTERN void alphahttpd_free(alphahttpd *srv);
 
+/** Set server configuration
+srv==NULL: initialize `conf` with default settings */
+FF_EXTERN int alphahttpd_conf(alphahttpd *srv, struct alphahttpd_conf *conf);
 
-/** Initialize HTTP modules */
-void http_mods_init();
+/** Run server's event loop */
+FF_EXTERN int alphahttpd_run(alphahttpd *srv);
 
-/** Start processing the client */
-void cl_start(struct ahd_kev *kev, ffsock csock, const ffsockaddr *peer, struct server *s, uint conn_id);
+/** Send stop-signal to the worker thread */
+FF_EXTERN void alphahttpd_stop(alphahttpd *srv);
+
+/** file: initialize content-type map
+content_types: heap buffer (e.g. "text/html	htm html\r\n"); user must not use it afterwards */
+FF_EXTERN void alphahttpd_filter_file_init(struct alphahttpd_conf *conf, ffstr content_types);
+
+FF_EXTERN void alphahttpd_filter_file_uninit(struct alphahttpd_conf *conf);
+
+struct alphahttpd_virtdoc {
+	const char *path, *method;
+
+	/** Called by virtspace filter to handle the requested document.
+	The handler must set resp.content_length, response status, 'resp_done' flag.
+	If resp.content_length is not set, empty '200 OK' response is returned. */
+	void (*handler)(alphahttpd_client *c);
+};
+
+/** Prepare the table of virtual documents.
+docs: static array (must be valid while the module is in use) */
+FF_EXTERN int alphahttpd_filter_virtspace_init(struct alphahttpd_conf *conf, const struct alphahttpd_virtdoc *docs);
+
+FF_EXTERN void alphahttpd_filter_virtspace_uninit(struct alphahttpd_conf *conf);

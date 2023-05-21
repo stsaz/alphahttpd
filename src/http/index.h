@@ -1,28 +1,31 @@
 /** alphahttpd: index document
 2022, Simon Zolin */
 
-static int index_open(struct client *c)
-{
-	if (c->resp_err
-		|| *ffstr_last(&c->req.unescaped_path) != '/')
-		return CHAIN_SKIP;
+#include <http/client.h>
+#include <FFOS/file.h>
 
-	return CHAIN_FWD;
+static int index_open(alphahttpd_client *c)
+{
+	if (c->resp_err || c->resp.code != 0
+		|| *ffstr_last(&c->req.unescaped_path) != '/')
+		return AHFILTER_SKIP;
+
+	return AHFILTER_FWD;
 }
 
-void index_close(struct client *c)
+void index_close(alphahttpd_client *c)
 {
 	ffvec_free(&c->index.buf);
 }
 
 /** ".../" -> ".../index.html" */
-int index_process(struct client *c)
+int index_process(alphahttpd_client *c)
 {
 	if (0 == ffvec_addfmt(&c->index.buf, "%S%S%S%Z"
-		, &ahd_conf->www, &c->req.unescaped_path, &ahd_conf->index_filename)) {
+		, &c->conf->fs.www, &c->req.unescaped_path, &c->conf->fs.index_filename)) {
 		cl_errlog(c, "no memory");
 		cl_resp_status(c, HTTP_500_INTERNAL_SERVER_ERROR);
-		return CHAIN_DONE;
+		return AHFILTER_DONE;
 	}
 	const char *fn = c->index.buf.ptr;
 
@@ -31,21 +34,21 @@ int index_process(struct client *c)
 		if (!fferr_notexist(fferr_last())) {
 			cl_syswarnlog(c, "index: fffile_open: %s", fn);
 		}
-		return CHAIN_DONE;
+		return AHFILTER_DONE;
 	}
 	cl_dbglog(c, "index: found %s", fn);
 	fffile_close(fd);
 	ffvec_free(&c->index.buf);
 
 	ffsize cap = c->req.unescaped_path.len;
-	if (0 == ffstr_growadd2(&c->req.unescaped_path, &cap, &ahd_conf->index_filename)) {
+	if (0 == ffstr_growadd2(&c->req.unescaped_path, &cap, &c->conf->fs.index_filename)) {
 		cl_errlog(c, "no memory");
 		cl_resp_status(c, HTTP_500_INTERNAL_SERVER_ERROR);
-		return CHAIN_DONE;
+		return AHFILTER_DONE;
 	}
-	return CHAIN_DONE;
+	return AHFILTER_DONE;
 }
 
-static const struct ahd_mod index_mod = {
+const struct alphahttpd_filter alphahttpd_filter_index = {
 	index_open, index_close, index_process
 };

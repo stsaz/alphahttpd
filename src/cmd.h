@@ -6,6 +6,18 @@
 #include <FFOS/sysconf.h>
 #include <FFOS/process.h>
 #include <FFOS/path.h>
+#include <FFOS/std.h>
+
+struct ahd_conf {
+	ffstr root_dir;
+	uint fd_limit;
+	uint workers_n;
+	uint cpumask;
+	uint kcall_workers;
+
+	struct alphahttpd_address listen_addr[2];
+	struct alphahttpd_conf aconf;
+};
 
 #define R_DONE  100
 #define R_BADVAL  101
@@ -40,14 +52,15 @@ static int ip_port_split(ffstr s, void *ip6, ffushort *port)
 
 static int cmd_listen(void *cs, struct ahd_conf *conf, ffstr *val)
 {
-	if (0 != ip_port_split(*val, conf->bind_ip, &conf->listen_port))
+	if (0 != ip_port_split(*val, conf->listen_addr[0].ip, (ffushort*)&conf->listen_addr[0].port))
 		return R_BADVAL;
+	conf->aconf.server.listen_addresses = conf->listen_addr;
 	return 0;
 }
 
 static int cmd_debug(void *cs, struct ahd_conf *conf)
 {
-	conf->log_level = LOG_DBG;
+	conf->aconf.log_level = ALPHAHTTPD_LOG_DEBUG;
 	return 0;
 }
 
@@ -79,11 +92,11 @@ static int cmd_help()
 
 static const ffcmdarg_arg ahd_cmd_args[] = {
 	{ 'l', "listen",	FFCMDARG_TSTR | FFCMDARG_FNOTEMPTY, (ffsize)cmd_listen },
-	{ 'w', "www",	FFCMDARG_TSTR | FFCMDARG_FNOTEMPTY, FF_OFF(struct ahd_conf, www) },
+	{ 'w', "www",	FFCMDARG_TSTR | FFCMDARG_FNOTEMPTY, FF_OFF(struct ahd_conf, aconf.fs.www) },
 	{ 't', "threads",	FFCMDARG_TINT32, FF_OFF(struct ahd_conf, workers_n) },
 	{ 'T', "kcall-threads",	FFCMDARG_TINT32, FF_OFF(struct ahd_conf, kcall_workers) },
 	{ 'c', "cpumask",	FFCMDARG_TSTR, (ffsize)cmd_cpumask },
-	{ 'p', "polling",	FFCMDARG_TSWITCH, FF_OFF(struct ahd_conf, polling_mode) },
+	{ 'p', "polling",	FFCMDARG_TSWITCH, FF_OFF(struct ahd_conf, aconf.server.polling_mode) },
 	{ 'D', "debug",	FFCMDARG_TSWITCH, (ffsize)cmd_debug },
 	{ 'h', "help",	FFCMDARG_TSWITCH, (ffsize)cmd_help },
 	{}
@@ -91,35 +104,24 @@ static const ffcmdarg_arg ahd_cmd_args[] = {
 
 void conf_destroy(struct ahd_conf *conf)
 {
-	ffstr_free(&conf->www);
+	alphahttpd_filter_file_uninit(&conf->aconf);
+
+	ffstr_free(&conf->aconf.fs.www);
 	ffstr_free(&conf->root_dir);
 }
 
 void conf_init(struct ahd_conf *conf)
 {
-	conf->listen_port = 80;
-	conf->max_connections = 10000;
-	conf->fd_limit = conf->max_connections * 2;
-	conf->read_buf_size = 4096;
-	conf->write_buf_size = 4096;
-	conf->file_buf_size = 16*1024;
-	conf->events_num = 1024;
-	conf->tcp_nodelay = 1;
-	conf->timer_interval_msec = 250;
-	conf->max_keep_alive_reqs = 100;
-	conf->log_level = LOG_INFO;
+	struct alphahttpd_conf *ac = &conf->aconf;
+	alphahttpd_conf(NULL, ac);
+	ffstr_dupz(&ac->fs.www, "www");
 
-	conf->read_timeout_sec = 65;
-	conf->write_timeout_sec = 65;
-	conf->fdlimit_timeout_sec = 10;
-
-	ffstr_dupz(&conf->www, "www");
-	ffstr_setz(&conf->index_filename, "index.html");
+	conf->fd_limit = ac->server.max_connections * 2;
 }
 
 int cmd_fin(struct ahd_conf *conf)
 {
-	if (!(ahd_conf->read_buf_size > 16 && ahd_conf->write_buf_size > 16)) {
+	if (!(conf->aconf.receive.buf_size > 16 && conf->aconf.response.buf_size > 16)) {
 		ffstderr_fmt("bad buffer sizes\n");
 		return -1;
 	}
@@ -133,6 +135,7 @@ int cmd_fin(struct ahd_conf *conf)
 	}
 	if (conf->kcall_workers == 0)
 		conf->kcall_workers = conf->workers_n;
+
 	return 0;
 }
 
@@ -164,7 +167,8 @@ int cmd_read(struct ahd_conf *conf, int argc, const char **argv)
 	return 0;
 }
 
-char* conf_abs_filename(const char *rel_fn)
+/** Convert relative file name to absolute file name using application directory */
+char* conf_abs_filename(struct ahd_conf *conf, const char *rel_fn)
 {
-	return ffsz_allocfmt("%S%s", &ahd_conf->root_dir, rel_fn);
+	return ffsz_allocfmt("%S%s", &conf->root_dir, rel_fn);
 }

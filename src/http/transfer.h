@@ -1,33 +1,35 @@
 /** alphahttpd: data transfer filter
 2022, Simon Zolin */
 
-static int trans_open(struct client *c)
+#include <http/client.h>
+
+static int ahtrans_open(alphahttpd_client *c)
 {
 	if (c->resp.content_length == (ffuint64)-1) {
 		c->resp_connection_keepalive = 0;
-		return CHAIN_SKIP;
+		return AHFILTER_SKIP;
 	}
-	c->conlen = c->resp.content_length;
-	return CHAIN_FWD;
+	c->transfer.cont_len = c->resp.content_length;
+	return AHFILTER_FWD;
 }
 
-static void trans_close(struct client *c)
+static void ahtrans_close(alphahttpd_client *c)
 {
 }
 
-static int trans_process(struct client *c)
+static int ahtrans_process(alphahttpd_client *c)
 {
 	if (c->chain_back)
-		return CHAIN_BACK;
+		return AHFILTER_BACK;
 
-	ffsize n = ffmin64(c->input.len, c->conlen);
+	ffsize n = ffmin64(c->input.len, c->transfer.cont_len);
 	ffstr_set(&c->output, c->input.ptr, n);
-	c->conlen -= n;
-	if (c->conlen == 0)
-		return CHAIN_DONE;
-	return CHAIN_FWD;
+	c->transfer.cont_len -= n;
+	if (c->transfer.cont_len == 0)
+		return AHFILTER_DONE;
+	return AHFILTER_FWD;
 }
 
-static const struct ahd_mod trans_mod = {
-	trans_open, trans_close, trans_process
+const struct alphahttpd_filter alphahttpd_filter_transfer = {
+	ahtrans_open, ahtrans_close, ahtrans_process
 };

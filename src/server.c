@@ -1,7 +1,7 @@
 /** alphahttpd: server
 2022, Simon Zolin */
 
-#include <alphahttpd.h>
+#include <http/client.h>
 #include <util/ipaddr.h>
 #include <FFOS/queue.h>
 #include <FFOS/socket.h>
@@ -9,11 +9,11 @@
 #include <FFOS/perf.h>
 #include <FFOS/thread.h>
 
-struct server {
-	struct ahd_kev kev;
-	struct ahd_boss *boss;
-	ffthread thd;
-	ffuint64 thd_id;
+struct alphahttpd {
+	struct alphahttpd_conf conf;
+	struct ahd_server si;
+	struct ahd_kev lsock_kev;
+	// ffuint64 thd_id;
 	ffsock lsock;
 	ffkq kq;
 	ffkq_event *kevents;
@@ -25,7 +25,6 @@ struct server {
 	struct ahd_kev post_kev;
 	ffkq_postevent kqpost;
 	uint worker_stop;
-	uint log_level;
 	uint sock_family;
 
 	struct ffkcallqueue kcq;
@@ -39,93 +38,127 @@ struct server {
 	char date_buf[FFS_LEN("0000-00-00T00:00:00.000")+1];
 };
 
-static void sv_accept(struct server *s);
-static int sv_timer_start(struct server *s);
-static int sv_worker(struct server *s);
-static void kcq_onsignal(struct server *s);
+extern void cl_start(struct ahd_kev *kev, ffsock csock, const ffsockaddr *peer, uint conn_id, alphahttpd *srv, struct ahd_server *si);
+extern void cl_destroy(alphahttpd_client *c);
+
+static void sv_accept(alphahttpd *s);
+static int sv_timer_start(alphahttpd *s);
+static int sv_kq_attach(alphahttpd *s, ffsock sk, struct ahd_kev *kev, void *obj);
+static void sv_timer(alphahttpd *s, ahd_timer *tmr, int interval_msec, fftimerqueue_func func, void *param);
+fftime sv_date(alphahttpd *s, ffstr *dts);
+static int sv_worker(alphahttpd *s);
+static void kcq_onsignal(alphahttpd *s);
 
 #define sv_sysfatallog(s, ...) \
-	ahd_log(s, LOG_SYSFATAL, NULL, __VA_ARGS__)
+	s->conf.log(s->conf.opaque, ALPHAHTTPD_LOG_SYSFATAL, NULL, __VA_ARGS__)
 
 #define sv_syserrlog(s, ...) \
-	ahd_log(s, LOG_SYSERR, NULL, __VA_ARGS__)
+	s->conf.log(s->conf.opaque, ALPHAHTTPD_LOG_SYSERR, NULL, __VA_ARGS__)
 
 #define sv_errlog(s, ...) \
-	ahd_log(s, LOG_ERR, NULL, __VA_ARGS__)
+	s->conf.log(s->conf.opaque, ALPHAHTTPD_LOG_ERR, NULL, __VA_ARGS__)
 
 #define sv_warnlog(s, ...) \
-	ahd_log(s, LOG_WARN, NULL, __VA_ARGS__)
+	s->conf.log(s->conf.opaque, ALPHAHTTPD_LOG_WARN, NULL, __VA_ARGS__)
 
 #define sv_verblog(s, ...) \
 do { \
-	if (s->log_level >= LOG_VERB) \
-		ahd_log(s, LOG_VERB, NULL, __VA_ARGS__); \
+	if (s->conf.log_level >= ALPHAHTTPD_LOG_VERBOSE) \
+		s->conf.log(s->conf.opaque, ALPHAHTTPD_LOG_VERBOSE, NULL, __VA_ARGS__); \
 } while (0)
 
 #define sv_dbglog(s, ...) \
 do { \
-	if (s->log_level >= LOG_DBG) \
-		ahd_log(s, LOG_DBG, NULL, __VA_ARGS__); \
+	if (s->conf.log_level >= ALPHAHTTPD_LOG_DEBUG) \
+		s->conf.log(s->conf.opaque, ALPHAHTTPD_LOG_DEBUG, NULL, __VA_ARGS__); \
 } while (0)
 
-struct server* sv_new(struct ahd_boss *boss)
+#define sv_extralog(s, ...)
+#ifdef ALPH_ENABLE_LOG_EXTRA
+	#undef sv_extralog
+	#define sv_extralog(s, ...) \
+	do { \
+		if (s->conf.log_level >= ALPHAHTTPD_LOG_DEBUG) \
+			s->conf.log(s->conf.opaque, ALPHAHTTPD_LOG_EXTRA, NULL, __VA_ARGS__); \
+	} while (0)
+#endif
+
+alphahttpd* alphahttpd_new()
 {
-	struct server *s = ffmem_new(struct server);
-	s->thd = FFTHREAD_NULL;
+	alphahttpd *s = ffmem_new(struct alphahttpd);
 	s->kq = FFKQ_NULL;
 	s->lsock = FFSOCK_NULL;
 	s->timer = FFTIMER_NULL;
-	s->log_level = ahd_conf->log_level;
-	s->boss = boss;
 	return s;
 }
 
-int sv_start(struct server *s)
+static void sv_log(void *opaque, ffuint level, const char *id, const char *format, ...)
+{}
+static void sv_logv(void *opaque, ffuint level, const char *id, const char *format, va_list va)
+{}
+
+/** Initialize default config */
+static void sv_conf_init(struct alphahttpd_conf *conf)
 {
-	if (FFTHREAD_NULL == (s->thd = ffthread_create((ffthread_proc)(void*)sv_run, s, 0))) {
-		sv_sysfatallog(s, "thread create");
-		return -1;
+	ffmem_zero_obj(conf);
+	conf->log_level = ALPHAHTTPD_LOG_INFO;
+	conf->log = sv_log;
+	conf->logv = sv_logv;
+
+	static struct alphahttpd_address a[2];
+	a[0].port = 80;
+	conf->server.listen_addresses = a;
+	conf->server.events_num = 1024;
+	conf->server.fdlimit_timeout_sec = 10;
+	conf->server.timer_interval_msec = 250;
+	conf->server.max_connections = 10000;
+	conf->server.conn_id_counter = &conf->server._conn_id_counter_default;
+
+	conf->max_keep_alive_reqs = 100;
+
+	conf->receive.buf_size = 4096;
+	conf->receive.timeout_sec = 65;
+
+	ffstr_setz(&conf->fs.index_filename, "index.html");
+	conf->fs.file_buf_size = 16*1024;
+
+	conf->response.buf_size = 4096;
+	ffstr_setz(&conf->response.server_name, "alphahttpd");
+
+	conf->send.tcp_nodelay = 1;
+	conf->send.timeout_sec = 65;
+}
+
+int alphahttpd_conf(alphahttpd *s, struct alphahttpd_conf *conf)
+{
+	if (s == NULL) {
+		sv_conf_init(conf);
+		return 0;
 	}
+
+	s->conf = *conf;
+	s->si.conf = &s->conf;
+	s->si.kq_attach = sv_kq_attach;
+	s->si.timer = sv_timer;
+	s->si.date = sv_date;
+	s->si.cl_destroy = cl_destroy;
 	return 0;
 }
 
-void sv_stop(struct server *s)
+void alphahttpd_stop(alphahttpd *s)
 {
-	if (s->worker_stop)
-		return;
+	if (s->worker_stop) return;
+
 	sv_dbglog(s, "stopping kq worker");
 	FFINT_WRITEONCE(s->worker_stop, 1);
-	ffcpu_fence_release();
 	ffkq_post(s->kqpost, &s->post_kev);
-	if (s->thd != FFTHREAD_NULL) {
-		ffthread_join(s->thd, -1, NULL);
-	}
 }
 
-#ifdef FF_LINUX
-typedef cpu_set_t _cpuset;
-#elif defined FF_BSD
-typedef cpuset_t _cpuset;
-#endif
-
-void sv_cpu_affinity(struct server *s, uint icpu)
+static int lsock_prepare(alphahttpd *s)
 {
-#ifdef FF_UNIX
-	_cpuset cpuset;
-	CPU_ZERO(&cpuset);
-	CPU_SET(icpu, &cpuset);
-	ffthread t = (s->thd != FFTHREAD_NULL) ? s->thd : pthread_self();
-	if (0 != pthread_setaffinity_np(t, sizeof(cpuset), &cpuset)) {
-		sv_syserrlog(s, "set CPU affinity");
-		return;
-	}
-	sv_dbglog(s, "CPU affinity: %u", icpu);
-#endif
-}
+	const struct alphahttpd_address *a = s->conf.server.listen_addresses;
 
-static int lsock_prepare(struct server *s)
-{
-	const void *ip4 = ffip6_tov4((void*)ahd_conf->bind_ip);
+	const void *ip4 = ffip6_tov4((void*)a->ip);
 	s->sock_family = (ip4 != NULL) ? AF_INET : AF_INET6;
 	if (FFSOCK_NULL == (s->lsock = ffsock_create_tcp(s->sock_family, FFSOCK_NONBLOCK))) {
 		sv_sysfatallog(s, "ffsock_create_tcp");
@@ -134,12 +167,12 @@ static int lsock_prepare(struct server *s)
 
 	ffsockaddr addr = {};
 	if (ip4 != NULL) {
-		ffsockaddr_set_ipv4(&addr, ip4, ahd_conf->listen_port);
+		ffsockaddr_set_ipv4(&addr, ip4, a->port);
 	} else {
-		ffsockaddr_set_ipv6(&addr, ahd_conf->bind_ip, ahd_conf->listen_port);
+		ffsockaddr_set_ipv6(&addr, a->ip, a->port);
 
 		// Allow clients to connect via IPv4
-		if (ffip6_isany((void*)ahd_conf->bind_ip)
+		if (ffip6_isany((void*)a->ip)
 			&& 0 != ffsock_setopt(s->lsock, IPPROTO_IPV6, IPV6_V6ONLY, 0)) {
 			sv_sysfatallog(s, "ffsock_setopt(IPV6_V6ONLY)");
 			return -1;
@@ -164,24 +197,28 @@ static int lsock_prepare(struct server *s)
 		sv_sysfatallog(s, "socket listen");
 		return -1;
 	}
+
+	sv_verblog(s, "listening on %u", a->port);
 	return 0;
 }
 
-static int kcq_init(struct server *s)
+static int kcq_init(alphahttpd *s)
 {
-	s->kcq.sq = s->boss->kcq_sq;
-	s->kcq.sem = s->boss->kcq_sem;
+	if (s->conf.kcq_set == NULL) return 0;
+
+	s->conf.kcq_set(s->conf.opaque, &s->kcq);
 	if (NULL == (s->kcq.cq = ffrq_alloc(s->connections_n))) {
 		sv_sysfatallog(s, "ffrq_alloc");
 		return -1;
 	}
-	if (ahd_conf->polling_mode) {
+	if (s->conf.server.polling_mode) {
 		s->kcq.kqpost = FFKQ_NULL;
 		return 0;
 	}
 
 	s->kcq_kev.rhandler = (ahd_kev_func)kcq_onsignal;
 	s->kcq_kev.obj = s;
+	s->kcq_kev.rtask.active = 1;
 	if (FFKQ_NULL == (s->kcq.kqpost = ffkq_post_attach(s->kq, &s->kcq_kev))) {
 		sv_sysfatallog(s, "ffkq_post_attach");
 		return -1;
@@ -190,13 +227,16 @@ static int kcq_init(struct server *s)
 	return 0;
 }
 
-int FFTHREAD_PROCCALL sv_run(struct server *s)
+int alphahttpd_run(alphahttpd *s)
 {
-	s->thd_id = ffthread_curid();
+	fftime_now(&s->date_now);
+	s->date_now.sec += FFTIME_1970_SECONDS;
 
-	s->connections_n = ahd_conf->max_connections / s->boss->workers.len;
+	// s->thd_id = ffthread_curid();
+
+	s->connections_n = s->conf.server.max_connections;
 	s->connections = (void*)ffmem_alloc(s->connections_n * sizeof(struct ahd_kev));
-	s->kevents = (void*)ffmem_alloc(ahd_conf->events_num * sizeof(ffkq_event));
+	s->kevents = (void*)ffmem_alloc(s->conf.server.events_num * sizeof(ffkq_event));
 	if (s->connections == NULL || s->kevents == NULL) {
 		sv_sysfatallog(s, "no memory");
 		return -1;
@@ -215,9 +255,9 @@ int FFTHREAD_PROCCALL sv_run(struct server *s)
 	if (0 != lsock_prepare(s))
 		return -1;
 
-	s->kev.rhandler = (ahd_kev_func)sv_accept;
-	s->kev.obj = s;
-	if (0 != ffkq_attach_socket(s->kq, s->lsock, &s->kev, FFKQ_READ)) {
+	s->lsock_kev.rhandler = (ahd_kev_func)sv_accept;
+	s->lsock_kev.obj = s;
+	if (0 != ffkq_attach_socket(s->kq, s->lsock, &s->lsock_kev, FFKQ_READ)) {
 		sv_sysfatallog(s, "ffkq_attach_socket");
 		return -1;
 	}
@@ -228,14 +268,15 @@ int FFTHREAD_PROCCALL sv_run(struct server *s)
 	if (0 != kcq_init(s))
 		return -1;
 
-	sv_verblog(s, "listening on %u", ahd_conf->listen_port);
 	sv_accept(s);
 	sv_worker(s);
 	return 0;
 }
 
-void sv_free(struct server *s)
+void alphahttpd_free(alphahttpd *s)
 {
+	if (s == NULL) return;
+
 	ffrq_free(s->kcq.cq);
 	fftimer_close(s->timer, s->kq);
 	ffsock_close(s->lsock);
@@ -245,23 +286,23 @@ void sv_free(struct server *s)
 	ffmem_free(s);
 }
 
-static int sv_accept1(struct server *s)
+static int sv_accept1(alphahttpd *s)
 {
 	if (s->conn_num == s->connections_n) {
 		sv_warnlog(s, "reached max worker connections limit %u", s->connections_n);
-		sv_timer(s, &s->tmr_fdlimit, -(int)ahd_conf->fdlimit_timeout_sec*1000, (fftimerqueue_func)sv_accept, s);
+		sv_timer(s, &s->tmr_fdlimit, -(int)s->conf.server.fdlimit_timeout_sec*1000, (fftimerqueue_func)sv_accept, s);
 		return -1;
 	}
 
 	ffsock csock;
 	ffsockaddr peer;
-	if (FFSOCK_NULL == (csock = ffsock_accept_async(s->lsock, &peer, FFSOCK_NONBLOCK, s->sock_family, NULL, &s->kev.rtask_accept))) {
+	if (FFSOCK_NULL == (csock = ffsock_accept_async(s->lsock, &peer, FFSOCK_NONBLOCK, s->sock_family, NULL, &s->lsock_kev.rtask_accept))) {
 		if (fferr_last() == FFSOCK_EINPROGRESS)
 			return -1;
 
 		if (fferr_fdlimit(fferr_last())) {
 			sv_syserrlog(s, "ffsock_accept");
-			sv_timer(s, &s->tmr_fdlimit, -(int)ahd_conf->fdlimit_timeout_sec*1000, (fftimerqueue_func)sv_accept, s);
+			sv_timer(s, &s->tmr_fdlimit, -(int)s->conf.server.fdlimit_timeout_sec*1000, (fftimerqueue_func)sv_accept, s);
 			return -1;
 		}
 
@@ -279,15 +320,19 @@ static int sv_accept1(struct server *s)
 	sv_dbglog(s, "using connection slot #%u [%u]"
 		, (uint)(kev - s->connections), s->conn_num + 1);
 
-	uint conn_id = ffint_fetch_add(&s->boss->conn_id, 1);
+	uint conn_id = ffint_fetch_add(s->conf.server.conn_id_counter, 1);
 
 	s->conn_num++;
-	kev->kcall.q = &s->kcq;
-	cl_start(kev, csock, &peer, s, conn_id);
+
+	if (s->conf.kcq_set != NULL)
+		kev->kcall.q = &s->kcq;
+
+	cl_start(kev, csock, &peer, conn_id, s, &s->si);
 	return 0;
 }
 
-static void sv_accept(struct server *s)
+/** Accept a bunch of client connections */
+static void sv_accept(alphahttpd *s)
 {
 	for (;;) {
 		if (0 != sv_accept1(s))
@@ -295,16 +340,16 @@ static void sv_accept(struct server *s)
 	}
 }
 
-static int sv_worker(struct server *s)
+static int sv_worker(alphahttpd *s)
 {
 	sv_dbglog(s, "entering kq loop");
 	ffkq_time t;
 	ffkq_time_set(&t, -1);
-	if (ahd_conf->polling_mode)
+	if (s->conf.server.polling_mode)
 		ffkq_time_set(&t, 0);
 
 	while (!FFINT_READONCE(s->worker_stop)) {
-		int r = ffkq_wait(s->kq, s->kevents, ahd_conf->events_num, t);
+		int r = ffkq_wait(s->kq, s->kevents, s->conf.server.events_num, t);
 
 		for (int i = 0;  i < r;  i++) {
 			ffkq_event *ev = &s->kevents[i];
@@ -318,15 +363,17 @@ static int sv_worker(struct server *s)
 			// ffkq_task_event_assign();
 
 #ifdef FF_WIN
-			if (ev->lpOverlapped == &c->rtask.overlapped)
-				flags = FFKQ_READ;
-			else if (ev->lpOverlapped == &c->wtask.overlapped)
+			flags = FFKQ_READ;
+			if (ev->lpOverlapped == &c->wtask.overlapped)
 				flags = FFKQ_WRITE;
 #endif
 
-			if ((flags & FFKQ_READ) && c->rhandler != NULL)
+			sv_extralog(s, "%p #%L f:%xu r:%d w:%d"
+				, c, c - s->connections, flags, c->rtask.active, c->wtask.active);
+
+			if ((flags & FFKQ_READ) && c->rtask.active)
 				c->rhandler(c->obj);
-			if ((flags & FFKQ_WRITE) && c->whandler != NULL)
+			if ((flags & FFKQ_WRITE) && c->wtask.active)
 				c->whandler(c->obj);
 		}
 
@@ -335,13 +382,18 @@ static int sv_worker(struct server *s)
 			return -1;
 		}
 
-		ffkcallq_process_cq(s->kcq.cq);
+		if (r > 1) {
+			sv_extralog(s, "processed %u events", r);
+		}
+
+		if (s->conf.kcq_set != NULL)
+			ffkcallq_process_cq(s->kcq.cq);
 	}
 	sv_dbglog(s, "leaving kq loop");
 	return 0;
 }
 
-void sv_conn_fin(struct server *s, struct ahd_kev *kev)
+void sv_conn_fin(alphahttpd *s, struct ahd_kev *kev)
 {
 	kev->rhandler = NULL;
 	kev->whandler = NULL;
@@ -357,7 +409,7 @@ void sv_conn_fin(struct server *s, struct ahd_kev *kev)
 		, (uint)(kev - s->connections), s->conn_num);
 }
 
-int sv_kq_attach(struct server *s, ffsock sk, struct ahd_kev *kev, void *obj)
+static int sv_kq_attach(alphahttpd *s, ffsock sk, struct ahd_kev *kev, void *obj)
 {
 	kev->obj = obj;
 	if (0 != ffkq_attach_socket(s->kq, sk, (void*)((ffsize)kev | kev->side), FFKQ_READWRITE)) {
@@ -367,12 +419,14 @@ int sv_kq_attach(struct server *s, ffsock sk, struct ahd_kev *kev, void *obj)
 	return 0;
 }
 
-ffuint64 sv_tid(struct server *s)
-{
-	return s->thd_id;
-}
+/** Get thread ID */
+// static ffuint64 sv_tid(alphahttpd *s);
+// {
+// 	return s->thd_id;
+// }
 
-fftime sv_date(struct server *s, ffstr *dts)
+/** Get cached calendar UTC date */
+fftime sv_date(alphahttpd *s, ffstr *dts)
 {
 	fftime t = s->date_now;
 	if (dts != NULL) {
@@ -388,7 +442,7 @@ fftime sv_date(struct server *s, ffstr *dts)
 	return t;
 }
 
-static void sv_ontimer(struct server *s)
+static void sv_ontimer(alphahttpd *s)
 {
 	fftime_now(&s->date_now);
 	s->date_now.sec += FFTIME_1970_SECONDS;
@@ -401,15 +455,16 @@ static void sv_ontimer(struct server *s)
 	fftimer_consume(s->timer);
 }
 
-static int sv_timer_start(struct server *s)
+static int sv_timer_start(alphahttpd *s)
 {
 	if (FFTIMER_NULL == (s->timer = fftimer_create(0))) {
 		sv_sysfatallog(s, "fftimer_create");
 		return -1;
 	}
-	s->timer_kev.rhandler = (ahd_kev_func)(void*)sv_ontimer;
+	s->timer_kev.rhandler = (ahd_kev_func)sv_ontimer;
 	s->timer_kev.obj = s;
-	if (0 != fftimer_start(s->timer, s->kq, &s->timer_kev, ahd_conf->timer_interval_msec)) {
+	s->timer_kev.rtask.active = 1;
+	if (0 != fftimer_start(s->timer, s->kq, &s->timer_kev, s->conf.server.timer_interval_msec)) {
 		sv_sysfatallog(s, "fftimer_start");
 		return -1;
 	}
@@ -418,7 +473,8 @@ static int sv_timer_start(struct server *s)
 	return 0;
 }
 
-void sv_timer(struct server *s, ahd_timer *tmr, int interval_msec, fftimerqueue_func func, void *param)
+/** Add/restart/remove periodic/one-shot timer */
+static void sv_timer(alphahttpd *s, ahd_timer *tmr, int interval_msec, fftimerqueue_func func, void *param)
 {
 	if (interval_msec == 0) {
 		if (fftimerqueue_remove(&s->timer_q, tmr))
@@ -430,8 +486,7 @@ void sv_timer(struct server *s, ahd_timer *tmr, int interval_msec, fftimerqueue_
 	sv_dbglog(s, "timer add: %p %d", tmr, interval_msec);
 }
 
-
-static void kcq_onsignal(struct server *s)
+static void kcq_onsignal(alphahttpd *s)
 {
 	ffkcallq_process_cq(s->kcq.cq);
 }

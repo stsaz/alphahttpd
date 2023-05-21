@@ -1,6 +1,16 @@
 # alphahttpd
 
-αhttpd is a small HTTP/1.1 file server.
+αhttpd is a fast and small HTTP/1.1 server.
+
+Contents:
+
+* [Features](#features)
+* [Build & Run](#build---run)
+* [Benchmark](#benchmark)
+* [HTTP server as a library](#http-server-as-a-library)
+
+
+## Features
 
 Current features and limitations:
 
@@ -80,6 +90,42 @@ Notes:
 * nginx writes access log to a real file
 * nginx has fd cache
 * nginx sends 3 more response header fields (Date, ETag, Accept-Ranges)
+
+
+## HTTP server as a library
+
+αhttpd's program interface allows you to run αhttpd from your own project and configure everything, even choosing the filters that process HTTP requests.
+You may also place your own filters into the HTTP request processing conveyor.
+
+Pseudo code for starting alphahttpd with 'virtspace' plugin:
+
+```C
+	#include <alphahttpd.h>
+
+	#include <http/{FILTER}.h>
+	// ...
+	static const struct alphahttpd_filter* ah_filters[] = {
+		&alphahttpd_filter_{FILTER},
+		// ...
+		NULL
+	};
+
+	struct alphahttpd_conf ac;
+	alphahttpd_conf(NULL, &ac);
+	// ac.option = ...;
+
+	static const struct alphahttpd_handler handlers[] = {
+		{ "/", "GET", root_handler },
+		{}
+	};
+	alphahttpd_filter_virtspace_init(&ac, handlers);
+
+	ac.filters = ah_filters;
+
+	alphahttpd *a = alphahttpd_new();
+	alphahttpd_conf(a, ac);
+	alphahttpd_run(a);
+```
 
 
 ## Homepage

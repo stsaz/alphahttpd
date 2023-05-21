@@ -24,7 +24,7 @@ CFLAGS := -Wall -Wextra -Wno-unused-parameter -Wno-sign-compare
 CFLAGS += -DFFBASE_HAVE_FFERR_STR
 CFLAGS += -I$(AHD_DIR)/src -I$(FFOS_DIR) -I$(FFBASE_DIR)
 ifeq "$(DEBUG)" "1"
-	CFLAGS += -DFF_DEBUG -O0 -g
+	CFLAGS += -DALPH_ENABLE_LOG_EXTRA -DFF_DEBUG -O0 -g
 # 	CFLAGS += -fsanitize=address
 # 	LINKFLAGS := -fsanitize=address
 else
@@ -43,19 +43,21 @@ default: build
 
 build: $(BIN)
 
-DEPS := $(wildcard $(AHD_DIR)/src/*.h) \
-	$(wildcard $(AHD_DIR)/src/http/*.h) \
-	$(wildcard $(AHD_DIR)/src/util/*.h) \
-	$(AHD_DIR)/Makefile
+DEPS := $(AHD_DIR)/Makefile $(AHD_DIR)/src/util/*.h \
+	$(FFOS_DIR)/FFOS/*.h \
+	$(FFBASE_DIR)/ffbase/*.h
 
+main.o: $(AHD_DIR)/src/main.c $(DEPS) $(AHD_DIR)/src/*.h
+	$(C) $(CFLAGS) $< -o $@
 %.o: $(AHD_DIR)/src/%.c $(DEPS)
 	$(C) $(CFLAGS) $< -o $@
-%.o: $(AHD_DIR)/src/http/%.c $(DEPS)
+%.o: $(AHD_DIR)/src/http/%.c $(DEPS) $(AHD_DIR)/src/http/*.h
 	$(C) $(CFLAGS) $< -o $@
 
 $(BIN): main.o \
+		server.o \
 		client.o \
-		server.o
+		filters.o
 	$(LINK) $+ $(LINKFLAGS) $(LINK_PTHREAD) -o $@
 
 clean:

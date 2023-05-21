@@ -1,26 +1,28 @@
 /** alphahttpd: error document
 2022, Simon Zolin */
 
-static int err_open(struct client *c)
+#include <http/client.h>
+
+static int aherr_open(alphahttpd_client *c)
 {
 	if (!c->resp_err)
-		return CHAIN_SKIP;
-	return CHAIN_FWD;
+		return AHFILTER_SKIP;
+	return AHFILTER_FWD;
 }
 
-static void err_close(struct client *c)
+static void aherr_close(alphahttpd_client *c)
 {
 }
 
-static int err_process(struct client *c)
+static int aherr_process(alphahttpd_client *c)
 {
 	ffstr_setz(&c->resp.content_type, "text/plain");
 	c->resp.content_length = c->resp.msg.len;
 	c->resp_done = 1;
 	ffstr_setstr(&c->output, &c->resp.msg);
-	return CHAIN_DONE;
+	return AHFILTER_DONE;
 }
 
-static const struct ahd_mod err_mod = {
-	err_open, err_close, err_process
+const struct alphahttpd_filter alphahttpd_filter_error = {
+	aherr_open, aherr_close, aherr_process
 };
