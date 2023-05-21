@@ -28,6 +28,8 @@ struct ahd_boss {
 	ffsem kcq_sem;
 	ffvec kcq_workers; // ffthread[]
 	uint kcq_stop;
+
+	uint stdout_color;
 };
 
 static struct ahd_conf *ahd_conf;
@@ -162,6 +164,20 @@ static void aconf_setup(struct ahd_conf *conf)
 	http_mods_init(ac);
 }
 
+/** Check if fd is a terminal */
+static int std_console(fffd fd)
+{
+#ifdef FF_WIN
+	DWORD r;
+	return GetConsoleMode(fd, &r);
+
+#else
+	fffileinfo fi;
+	return (0 == fffile_info(fd, &fi)
+		&& FFFILE_UNIX_CHAR == (fffileinfo_attr(&fi) & FFFILE_UNIX_TYPEMASK));
+#endif
+}
+
 int main(int argc, char **argv)
 {
 	static const char appname[] = "αhttpd v" AHD_VER "\n";
@@ -183,6 +199,13 @@ int main(int argc, char **argv)
 
 	boss = ffmem_new(struct ahd_boss);
 	boss->conn_id = 1;
+
+#ifdef FF_WIN
+	boss->stdout_color = (0 == ffstd_attr(ffstdout, FFSTD_VTERM, FFSTD_VTERM));
+	(void)std_console;
+#else
+	boss->stdout_color = std_console(ffstdout);
+#endif
 
 	if (0 != ffsock_init(FFSOCK_INIT_SIGPIPE | FFSOCK_INIT_WSA | FFSOCK_INIT_WSAFUNCS))
 		goto end;
